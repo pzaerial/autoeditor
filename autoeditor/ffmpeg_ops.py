@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .config import Config
 from .pipeline import Segment, SegmentType
+from .silence import compute_keep_intervals
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +29,16 @@ class ClipInfo:
     height: int
     fps: float
     has_audio: bool
+    # Loud (keep) regions in seconds when dead-space removal trims this clip.
+    # None means the clip plays in full.
+    keep_intervals: list[tuple[float, float]] | None = None
+
+    @property
+    def effective_duration(self) -> float:
+        """Output duration after dead-space trimming (full duration if none)."""
+        if self.keep_intervals is None:
+            return self.duration
+        return sum(b - a for a, b in self.keep_intervals)
 
 
 def probe_clip(path: Path) -> ClipInfo:
@@ -121,7 +132,7 @@ def _group_duration(
     fade_dur: float,
 ) -> float:
     """Effective output duration of a group, accounting for xfade overlap."""
-    durations = [clips[i].duration for i in indices]
+    durations = [clips[i].effective_duration for i in indices]
     n = len(durations)
     if n <= 1 or fade_dur <= 0:
         return sum(durations)
@@ -172,10 +183,45 @@ def _build_filter_complex(
 
     # ------------------------------------------------------------------
     # 1. Per-clip normalisation
+    #
+    # When a clip carries keep_intervals (dead-space removal), each source
+    # stream is first split, trimmed to every loud region, and concatenated
+    # back together — butting the kept pieces edge-to-edge — before the usual
+    # scale/fps/format normalisation. All segments come from the same source,
+    # so their raw frames share size/format and concat needs no pre-normalise.
     # ------------------------------------------------------------------
     for i, clip in enumerate(clips):
+        v_src, a_src = f"[{i}:v]", f"[{i}:a]"
+
+        if clip.keep_intervals:
+            k = len(clip.keep_intervals)
+            v_outs = "".join(f"[vsr{i}_{j}]" for j in range(k))
+            parts.append(f"[{i}:v]split={k}{v_outs}")
+            v_trimmed = []
+            for j, (a, b) in enumerate(clip.keep_intervals):
+                parts.append(
+                    f"[vsr{i}_{j}]trim=start={a:.3f}:end={b:.3f},"
+                    f"setpts=PTS-STARTPTS[vtr{i}_{j}]"
+                )
+                v_trimmed.append(f"[vtr{i}_{j}]")
+            parts.append(f"{''.join(v_trimmed)}concat=n={k}:v=1:a=0[vcat{i}]")
+            v_src = f"[vcat{i}]"
+
+            if clip.has_audio:
+                a_outs = "".join(f"[asr{i}_{j}]" for j in range(k))
+                parts.append(f"[{i}:a]asplit={k}{a_outs}")
+                a_trimmed = []
+                for j, (a, b) in enumerate(clip.keep_intervals):
+                    parts.append(
+                        f"[asr{i}_{j}]atrim=start={a:.3f}:end={b:.3f},"
+                        f"asetpts=PTS-STARTPTS[atr{i}_{j}]"
+                    )
+                    a_trimmed.append(f"[atr{i}_{j}]")
+                parts.append(f"{''.join(a_trimmed)}concat=n={k}:v=0:a=1[acat{i}]")
+                a_src = f"[acat{i}]"
+
         parts.append(
-            f"[{i}:v]"
+            f"{v_src}"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
             f"fps={fps},"
@@ -184,7 +230,7 @@ def _build_filter_complex(
         )
         if clip.has_audio:
             parts.append(
-                f"[{i}:a]"
+                f"{a_src}"
                 f"aresample=48000,"
                 f"aformat=sample_fmts=fltp:channel_layouts=stereo"
                 f"[an{i}]"
@@ -192,7 +238,7 @@ def _build_filter_complex(
         else:
             # Synthesise a silent stereo track matching the clip duration.
             parts.append(
-                f"aevalsrc=exprs=0:c=stereo:r=48000:d={clip.duration:.6f}[an{i}]"
+                f"aevalsrc=exprs=0:c=stereo:r=48000:d={clip.effective_duration:.6f}[an{i}]"
             )
 
     # ------------------------------------------------------------------
@@ -220,7 +266,7 @@ def _build_filter_complex(
 
         else:
             # xfade / acrossfade chain across all clips in the group.
-            durations = [clips[i].duration for i in indices]
+            durations = [clips[i].effective_duration for i in indices]
             cumulative = 0.0
 
             for k in range(n - 1):
@@ -399,7 +445,23 @@ def render_project(
     clips: list[ClipInfo] = []
     for seg in segments:
         log(f"    {seg.label}: {seg.path.name}")
-        clips.append(probe_clip(seg.path))
+        clip = probe_clip(seg.path)
+
+        # Dead-space removal applies only to game recordings — branded assets
+        # (intro/outro/transition/midroll) are already tightly edited.
+        if config.remove_dead_space and seg.type == SegmentType.GAME and clip.has_audio:
+            clip.keep_intervals = compute_keep_intervals(
+                seg.path, clip.duration, config
+            )
+            if clip.keep_intervals:
+                removed = clip.duration - clip.effective_duration
+                log(
+                    f"      dead space: {len(clip.keep_intervals)} segment(s) kept, "
+                    f"{_fmt_time(removed)} trimmed "
+                    f"({_fmt_time(clip.duration)} → {_fmt_time(clip.effective_duration)})"
+                )
+
+        clips.append(clip)
 
     # Step 2: Build filter graph
     groups = _split_into_groups(segments)

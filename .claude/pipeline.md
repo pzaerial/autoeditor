@@ -21,6 +21,7 @@ Intro → Deck Tech → Midroll Ad 1 → Transition
 
 ## Rendering steps ()
 
+0. **Dead-space detection** (preprocess, `REMOVE_DEAD_SPACE=true`) — for each `GAME` clip, measure peak loudness and run `silencedetect` (floor relative to peak), invert to loud regions, pad + merge + drop tiny → `keep_intervals`. In-graph `trim`/`atrim` + `concat` drops the silence during normalization (step 1); no intermediate files.
 1. **Normalize** all clips — h264/aac 48kHz stereo, target resolution (letterboxed), target FPS. Silent audio synthesised if source has no audio track.
 2. **Split into groups** — midroll ads are isolated as single-item groups; all other consecutive segments form content groups.
 3. **Render each group:**

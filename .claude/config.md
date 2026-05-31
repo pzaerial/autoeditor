@@ -39,3 +39,15 @@ All asset paths are optional. Unset = asset is skipped.
 | `TARGET_FPS` | `60` | Output frame rate |
 | `FADE_DURATION` | `0.3` | Crossfade duration in seconds between clips within a group. `0` = hard cuts |
 | `OUTPUT_FADE_DURATION` | `0.5` | Duration in seconds for: fade-in at start of final output, fade-out at end of final output, and fade-out before each midroll ad |
+
+## Dead Space Removal
+
+Applies to **game segments only** (`SegmentType.GAME`). Detection is per-clip and relative to that clip's own peak loudness. Trimming is done in-graph (`trim`/`atrim` + `concat`) during the single render pass — no intermediate files.
+
+| Variable | Default | Description |
+|---|---|---|
+| `REMOVE_DEAD_SPACE` | `true` | Master toggle for silence trimming on game recordings |
+| `DEAD_SPACE_PADDING` | `0.5` | Seconds of buffer kept around each loud region; gaps `< 2×` this merge |
+| `DEAD_SPACE_THRESHOLD_DB` | `-30` | Silence floor in dB below the clip's peak (`max_volume`). More negative = less aggressive |
+| `DEAD_SPACE_MIN_SILENCE` | `1.0` | Minimum silence length (s) passed to `silencedetect` `d=` |
+| `DEAD_SPACE_MIN_SEGMENT` | `0.5` | Kept regions shorter than this (s) are dropped |

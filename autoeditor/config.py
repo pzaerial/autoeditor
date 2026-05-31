@@ -22,6 +22,11 @@ class Config:
     fade_duration: float
     output_fade_duration: float
     video_encoder: str
+    remove_dead_space: bool
+    dead_space_padding: float
+    dead_space_threshold_db: float
+    dead_space_min_silence: float
+    dead_space_min_segment: float
 
 
 def load_config() -> Config:
@@ -47,4 +52,9 @@ def load_config() -> Config:
         fade_duration=float(os.getenv("FADE_DURATION", "0.5")),
         output_fade_duration=float(os.getenv("OUTPUT_FADE_DURATION", "1.0")),
         video_encoder=os.getenv("VIDEO_ENCODER", "libx264"),
+        remove_dead_space=os.getenv("REMOVE_DEAD_SPACE", "true").lower() == "true",
+        dead_space_padding=float(os.getenv("DEAD_SPACE_PADDING", "0.5")),
+        dead_space_threshold_db=float(os.getenv("DEAD_SPACE_THRESHOLD_DB", "-30")),
+        dead_space_min_silence=float(os.getenv("DEAD_SPACE_MIN_SILENCE", "1.0")),
+        dead_space_min_segment=float(os.getenv("DEAD_SPACE_MIN_SEGMENT", "0.5")),
     )

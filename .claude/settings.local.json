@@ -5,7 +5,11 @@
       "Read(//c/Users/runya/.claude/projects/c--Users-runya-Documents-repositories-fullcontrolmtg-autoeditor/memory//**)",
       "Read(//c/Users/runya/.claude/projects/c--Users-runya-Documents-repositories-fullcontrolmtg-autoeditor/memory/**)",
       "Bash(cp -r /c/Users/runya/.claude/projects/c--Users-runya-Documents-repositories-fullcontrolmtg-autoeditor/memory/* /c/Users/runya/Documents/repositories/fullcontrolmtg-autoeditor/)",
-      "Bash(rm -rf /c/Users/runya/.claude/projects/c--Users-runya-Documents-repositories-fullcontrolmtg-autoeditor/memory/)"
+      "Bash(rm -rf /c/Users/runya/.claude/projects/c--Users-runya-Documents-repositories-fullcontrolmtg-autoeditor/memory/)",
+      "Bash(python -c \"import autoeditor.config, autoeditor.silence, autoeditor.ffmpeg_ops, autoeditor.pipeline; print\\('imports OK'\\)\")",
+      "Bash(python -c \"import shutil; print\\('ffmpeg:', shutil.which\\('ffmpeg'\\)\\); print\\('ffprobe:', shutil.which\\('ffprobe'\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"print\\(open\\('_ds_test/fc.txt'\\).read\\(\\)\\)\")"
     ]
   }
 }

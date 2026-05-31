@@ -96,6 +96,7 @@ Intro → Deck Tech [fade out] → Midroll Ad 1 → Transition
 
 - **Automatic pipeline assembly** — intro, outro, transition clips, and midroll ads are inserted in the correct order automatically based on the number of games in the project folder.
 - **Batch or single-project processing** — process an entire folder of projects in one run, or target a single project folder, controlled by a flag in `.env`.
+- **Dead-space removal** — long silences are automatically trimmed out of game recordings using peak-relative silence detection, with padding and clip-merging to keep the result smooth. Applied inside the single render pass (see below).
 - **Crossfade between clips** — configurable `xfade` / `acrossfade` crossfades between content clips within a group for smooth transitions.
 - **Hard cuts around ads** — midroll ads always cut in and out cleanly with no crossfade bleed.
 - **Global fade-in / fade-out** — the final output video fades up from black at the start and fades to black at the end.
@@ -218,6 +219,38 @@ Copy `.env.example` to `.env` and edit as needed. All paths accept forward slash
 | `FADE_DURATION` | Crossfade duration in seconds between clips within a group. `0` = hard cuts | `0.3` |
 | `OUTPUT_FADE_DURATION` | Fade-in / fade-out duration in seconds on the final output. `0` = no fade | `0.5` |
 | `VIDEO_ENCODER` | ffmpeg video encoder: `libx264` (CPU), `h264_nvenc` (NVIDIA), `h264_amf` (AMD), `h264_qsv` (Intel) | `libx264` |
+| `REMOVE_DEAD_SPACE` | Trim long silences out of game recordings (assets and deck tech untouched) | `true` |
+| `DEAD_SPACE_PADDING` | Buffer (seconds) kept around each loud region; also the merge threshold for adjacent clips | `0.5` |
+| `DEAD_SPACE_THRESHOLD_DB` | Silence floor in dB below each clip's peak loudness. More negative = less aggressive | `-30` |
+| `DEAD_SPACE_MIN_SILENCE` | Minimum silence length (seconds) before it is eligible to be cut | `1.0` |
+| `DEAD_SPACE_MIN_SEGMENT` | Drop kept regions shorter than this (seconds) to avoid jarring blips | `0.5` |
+
+---
+
+## Dead Space Removal
+
+When `REMOVE_DEAD_SPACE=true`, each **game recording** is scanned for long silent
+stretches, which are cut out before stitching — a hands-off "jump cut" pass. The
+deck tech and branded assets (intro, outro, transition, midroll ads) are never
+touched.
+
+How it works:
+
+1. Each clip's **peak loudness** is measured, and the silence floor is set
+   *relative to that peak* (`DEAD_SPACE_THRESHOLD_DB` below it). This adapts
+   automatically to different mic gain between recording sessions, rather than
+   relying on a fragile fixed dBFS value.
+2. `ffmpeg`'s `silencedetect` finds silences longer than `DEAD_SPACE_MIN_SILENCE`.
+3. The **loud regions** between them are kept (additive method), each padded by
+   `DEAD_SPACE_PADDING` so word and action edges are never clipped.
+4. Kept regions separated by a gap shorter than `2 × DEAD_SPACE_PADDING` **merge**
+   into one continuous clip, and isolated blips shorter than `DEAD_SPACE_MIN_SEGMENT`
+   are dropped — together these prevent a fractured, choppy result.
+
+Trimming happens **inside the single render pass** (via `trim`/`atrim` + `concat`
+in the filter graph), so there are no intermediate files and content is encoded
+only once. Detection itself uses two fast audio-only probes per clip (no video
+decode).
 
 ---
 
