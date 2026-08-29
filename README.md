@@ -9,10 +9,10 @@ Control your video format by writing a markdown file.
 
 ## Quick start
 
-Copy [example.md](example.md), point the paths at your own files, and run it:
+Copy a script out of [templates/](templates/), point the paths at your own files, and run it:
 
 ```
-python script.py example.md
+python script.py templates\example.md
 ```
 
 Set `dry run: yes` in the `## Output` section to print the resolved timeline without rendering — a fast way to check every path and join before committing to an encode.

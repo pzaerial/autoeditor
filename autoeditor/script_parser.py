@@ -1,24 +1,4 @@
-"""Parser for the markdown video-script format.
-
-The format is plain markdown: `## Headings` open sections, and list items
-inside them carry the settings. Everything else -- paragraphs, blockquotes,
-fenced code blocks -- is prose and is ignored, so a script doubles as readable
-notes about the episode.
-
-    # Episode 12
-
-    ## Output
-    - file: C:\\Videos\\out\\ep12.mp4
-    - resolution: 1920x1080
-
-    ## Timeline
-    1. `C:\\Assets\\intro.mp4`
-    2. `C:\\Footage\\ep12\\deck-tech.mp4` -- trim silence
-    3. `ad1` -- fade
-
-Paths may be bare, backticked or quoted; relative paths resolve against the
-directory holding the script file.
-"""
+"""Parse a markdown video script into a VideoScript."""
 
 import os
 import re
@@ -43,15 +23,10 @@ class ScriptError(Exception):
         super().__init__(f"line {line}: {message}" if line else message)
 
 
-# ---------------------------------------------------------------------------
-# Line-level regexes
-# ---------------------------------------------------------------------------
-
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 _RESOLUTION_RE = re.compile(r"^\d+\s*[x\u00d7]\s*\d+$")
-# Option separator on a timeline item: `--`, an em/en dash, or a pipe.
 _OPTION_SPLIT_RE = re.compile(r"\s(?:--|\u2014|\u2013|\|)\s")
 
 _SECTION_ALIASES = {
@@ -75,10 +50,6 @@ _SECTION_ALIASES = {
 _TRUTHY = {"true", "yes", "on", "1", "y"}
 _FALSY = {"false", "no", "off", "0", "n"}
 
-
-# ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
 
 def _norm_key(text: str) -> str:
     """Normalise a key so `Fade In`, `fade_in` and `**fade-in**` all match."""
@@ -107,8 +78,7 @@ def _split_kv(item: str, line: int, section: str) -> tuple[str, str]:
         )
 
     key, value = _norm_key(match.group(1)), _clean_value(match.group(2))
-    # A bare `C:\...` path would otherwise split into the key "c" -- catch it
-    # rather than registering a nonsense setting named after the drive letter.
+    # A bare `C:\...` path would otherwise register a setting named after the drive.
     if len(key) == 1 and value[:1] in ("\\", "/"):
         raise ScriptError(
             f"{section} entries need a name: `name: {match.group(0).strip()}`", line
@@ -139,10 +109,6 @@ def _unknown_key(key: str, valid: dict, section: str, line: int) -> ScriptError:
     return ScriptError(f"unknown {section} setting {key!r}. Valid: {options}", line)
 
 
-# ---------------------------------------------------------------------------
-# Path resolution
-# ---------------------------------------------------------------------------
-
 def _resolve_path(raw: str, base: Path) -> Path:
     """Expand env vars and `~`, then anchor relative paths to the script dir."""
     expanded = os.path.expandvars(os.path.expanduser(raw.strip().strip('"')))
@@ -150,18 +116,14 @@ def _resolve_path(raw: str, base: Path) -> Path:
     return path if path.is_absolute() else (base / path)
 
 
-# Characters Windows forbids in a file or folder name. A colon is the dangerous
-# one: `Daily Dub #101: title.mp4` is not rejected by Windows, it silently
-# writes an empty `Daily Dub #101` plus a hidden alternate data stream, so the
-# render appears to succeed and produces no video.
 _WINDOWS_RESERVED = '<>:"|?*'
 
 
 def _check_writable_name(path: Path, line: int) -> None:
-    """Reject an output path Windows cannot store under the name given."""
+    """Reject an output path Windows would silently write as a data stream."""
     if os.name != "nt":
         return
-    for part in path.parts[1:]:  # skip the drive/anchor, whose colon is legal
+    for part in path.parts[1:]:
         bad = sorted({ch for ch in part if ch in _WINDOWS_RESERVED})
         if bad:
             raise ScriptError(
@@ -173,11 +135,7 @@ def _check_writable_name(path: Path, line: int) -> None:
 
 
 def _expand_source(path: Path, line: int) -> list[Path]:
-    """Expand a directory or glob into the video files it stands for.
-
-    Directories and globs are sorted by modification time then name, matching
-    the order the clips were recorded in.
-    """
+    """Expand a directory or glob into its video files, oldest first."""
     if any(ch in path.name for ch in "*?[") and not path.exists():
         matches = [p for p in path.parent.glob(path.name) if p.is_file()]
         if not matches:
@@ -197,10 +155,6 @@ def _expand_source(path: Path, line: int) -> list[Path]:
         raise ScriptError(f"file not found: {path}", line)
     return [path]
 
-
-# ---------------------------------------------------------------------------
-# Timeline item options
-# ---------------------------------------------------------------------------
 
 _JOIN_WORDS = {
     "cut": Join.CUT,
@@ -253,10 +207,6 @@ def _default_duration(join: Join, defaults: Defaults) -> float:
         return defaults.fade
     return 0.0
 
-
-# ---------------------------------------------------------------------------
-# Section handlers
-# ---------------------------------------------------------------------------
 
 _OUTPUT_KEYS = {
     "file": "file", "output": "file", "path": "file", "output file": "file",
@@ -333,10 +283,6 @@ def _apply_defaults(raw: dict[str, tuple[str, int]]) -> Defaults:
     return defaults
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def parse_script(path: Path) -> VideoScript:
     """Parse a markdown video script into a `VideoScript`."""
     if not path.exists():
@@ -389,7 +335,7 @@ def parse_script(path: Path) -> VideoScript:
 
         item = _LIST_ITEM_RE.match(line)
         if not item or section is None:
-            continue  # prose, or a list outside any known section
+            continue
         content = item.group(1).strip()
         if not content:
             continue
@@ -436,7 +382,7 @@ def _build_clips(
     defaults: Defaults,
     base: Path,
 ) -> list[TimelineClip]:
-    """Turn raw timeline lines into resolved clips, expanding folders/globs."""
+    """Resolve raw timeline lines into clips, expanding folders and globs."""
     clips: list[TimelineClip] = []
 
     for content, lineno in items:
@@ -449,8 +395,7 @@ def _build_clips(
         duration = duration if duration is not None else _default_duration(join, defaults)
         trim = trim if trim is not None else defaults.trim_silence
 
-        # A blend of zero length is just a cut -- collapsing it here keeps the
-        # filter graph free of degenerate xfade/fade filters.
+        # A zero-length blend is a cut; collapse it so the graph has no degenerate filters.
         if join is not Join.CUT and duration <= 0:
             join, duration = Join.CUT, 0.0
 
@@ -474,11 +419,8 @@ def _build_clips(
 
 
 def _split_item(content: str) -> tuple[str, str]:
-    """Split a timeline item into its source and its option text.
-
-    A backticked source is honoured first so a path containing the separator
-    still parses cleanly.
-    """
+    """Split a timeline item into its source and its option text."""
+    # A backticked source is honoured first so a path containing the separator parses.
     if content.startswith("`"):
         end = content.find("`", 1)
         if end != -1:

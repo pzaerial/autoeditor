@@ -1,14 +1,4 @@
-"""Low-level ffmpeg operations -- single-pass pipeline.
-
-All source clips are fed as inputs to a single ffmpeg call. A filter_complex
-graph normalises every clip, builds crossfades where the script asks for them,
-fades to and from black across `fade` joins, hard-cuts across `cut` joins, and
-applies the final fade-in/out -- all in one encode pass with no intermediate
-files.
-
-The assembly order comes entirely from the parsed script's clip list; nothing
-here knows what an intro or a midroll ad is.
-"""
+"""Single-pass ffmpeg render: every clip is an input to one filter_complex."""
 
 import json
 import subprocess
@@ -20,10 +10,6 @@ from .silence import compute_keep_intervals
 from .timeline import Join, TimelineClip, VideoScript
 
 
-# ---------------------------------------------------------------------------
-# Probe
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ClipInfo:
     path: Path
@@ -32,13 +18,12 @@ class ClipInfo:
     height: int
     fps: float
     has_audio: bool
-    # Loud (keep) regions in seconds when dead-space removal trims this clip.
-    # None means the clip plays in full.
+    # Loud regions to keep; None means the clip plays in full.
     keep_intervals: list[tuple[float, float]] | None = None
 
     @property
     def effective_duration(self) -> float:
-        """Output duration after dead-space trimming (full duration if none)."""
+        """Output duration after dead-space trimming."""
         if self.keep_intervals is None:
             return self.duration
         return sum(b - a for a, b in self.keep_intervals)
@@ -77,10 +62,6 @@ def probe_clip(path: Path) -> ClipInfo:
     )
 
 
-# ---------------------------------------------------------------------------
-# Encoder helpers
-# ---------------------------------------------------------------------------
-
 _ENCODER_QUALITY: dict[str, list[str]] = {
     "libx264":    ["-preset", "fast", "-crf", "18"],
     "libx265":    ["-preset", "fast", "-crf", "22"],
@@ -92,22 +73,12 @@ _ENCODER_QUALITY: dict[str, list[str]] = {
 
 
 def _encode_args(encoder: str) -> list[str]:
-    """Return [-c:v <encoder> + quality flags] for the configured encoder."""
     quality = _ENCODER_QUALITY.get(encoder, ["-preset", "fast", "-crf", "18"])
     return ["-c:v", encoder] + quality
 
 
-# ---------------------------------------------------------------------------
-# Group splitting
-# ---------------------------------------------------------------------------
-
 def _split_into_groups(clips: list[TimelineClip]) -> list[list[int]]:
-    """Split clip indices into groups at every non-crossfade join.
-
-    Clips joined by `crossfade` share a group and are blended with an xfade
-    chain. `cut` and `fade` joins end the current group, because both hard-cut
-    the assembled streams (a `fade` join just darkens each side first).
-    """
+    """Group clips into runs joined by crossfade; cut and fade joins end a run."""
     groups: list[list[int]] = []
     current: list[int] = []
 
@@ -123,14 +94,10 @@ def _split_into_groups(clips: list[TimelineClip]) -> list[list[int]]:
     return groups
 
 
-# ---------------------------------------------------------------------------
-# Duration helpers
-# ---------------------------------------------------------------------------
-
 def _group_duration(
     indices: list[int], infos: list[ClipInfo], clips: list[TimelineClip]
 ) -> float:
-    """Effective output duration of a group, accounting for xfade overlap."""
+    """Output duration of a group, accounting for xfade overlap."""
     total = infos[indices[0]].effective_duration
     for i in indices[1:]:
         total += infos[i].effective_duration - clips[i].join_duration
@@ -143,42 +110,13 @@ def _total_duration(
     return sum(_group_duration(g, infos, clips) for g in groups)
 
 
-# ---------------------------------------------------------------------------
-# Filter graph builder
-# ---------------------------------------------------------------------------
-
 def _build_filter_complex(
     infos: list[ClipInfo],
     clips: list[TimelineClip],
     groups: list[list[int]],
     script: VideoScript,
 ) -> tuple[str, str, str]:
-    """Build the complete filter_complex for a single-pass render.
-
-    Returns (filter_complex_string, v_out_label, a_out_label).
-
-    Graph structure
-    ---------------
-    For each input clip i:
-      [i:v] -> (trim/concat if silence removed) -> scale/pad/fps/format -> [vni]
-      [i:a] -> (atrim/concat if silence removed) -> aresample/aformat   -> [ani]
-               (or aevalsrc when the source has no audio track)
-
-    For each group g (clips joined by crossfade):
-      [vni][vnj]... -> xfade chain      -> [vxg]
-      [ani][anj]... -> acrossfade chain -> [axg]
-
-    Where a `fade` join meets a group boundary:
-      the group before it gains fade=out / afade=out,
-      the group after it gains fade=in / afade=in.
-
-    All groups:
-      [vg0][ag0][vg1][ag1]... -> concat -> [vpre][apre]
-
-    Final:
-      [vpre] -> fade=in,fade=out   -> [vout]
-      [apre] -> afade=in,afade=out -> [aout]
-    """
+    """Build the filter_complex, returning it with the output video/audio labels."""
     width, height = script.output.size
     fps = script.output.fps
     in_fade = script.output.fade_in
@@ -186,15 +124,7 @@ def _build_filter_complex(
 
     parts: list[str] = []
 
-    # ------------------------------------------------------------------
-    # 1. Per-clip normalisation
-    #
-    # When a clip carries keep_intervals (dead-space removal), each source
-    # stream is first split, trimmed to every loud region, and concatenated
-    # back together -- butting the kept pieces edge-to-edge -- before the usual
-    # scale/fps/format normalisation. All segments come from the same source,
-    # so their raw frames share size/format and concat needs no pre-normalise.
-    # ------------------------------------------------------------------
+    # Per-clip: drop dead space in-graph, then normalise size, rate and format.
     for i, info in enumerate(infos):
         v_src, a_src = f"[{i}:v]", f"[{i}:a]"
 
@@ -242,7 +172,6 @@ def _build_filter_complex(
                 f"[an{i}]"
             )
         else:
-            # Synthesise a silent stereo track matching the clip duration.
             parts.append(
                 f"anullsrc=channel_layout=stereo:sample_rate=48000:"
                 f"duration={info.effective_duration:.6f},"
@@ -250,9 +179,6 @@ def _build_filter_complex(
                 f"[an{i}]"
             )
 
-    # ------------------------------------------------------------------
-    # 2. Per-group crossfade chains
-    # ------------------------------------------------------------------
     group_v: list[str] = []
     group_a: list[str] = []
 
@@ -263,9 +189,7 @@ def _build_filter_complex(
             v_label = f"vn{indices[0]}"
             a_label = f"an{indices[0]}"
         else:
-            # xfade / acrossfade chain across all clips in the group. Each pair
-            # may blend for a different duration, so the offset is tracked as a
-            # running total of the chain's own output length.
+            # Offsets track the running output length, as blend durations vary per pair.
             acc = infos[indices[0]].effective_duration
 
             for k in range(n - 1):
@@ -294,9 +218,6 @@ def _build_filter_complex(
             v_label = f"vx{g}"
             a_label = f"ax{g}"
 
-        # --------------------------------------------------------------
-        # 3. Fades to/from black at `fade` join boundaries
-        # --------------------------------------------------------------
         v_chain: list[str] = []
         a_chain: list[str] = []
 
@@ -306,7 +227,7 @@ def _build_filter_complex(
             v_chain.append(f"fade=t=in:st=0:d={up}")
             a_chain.append(f"afade=t=in:st=0:d={up}")
 
-        # A fade join opening the *next* group fades this one down to black.
+        # A fade join opening the next group fades this one down to black.
         if g + 1 < len(groups):
             nxt_first = groups[g + 1][0]
             if clips[nxt_first].join is Join.FADE:
@@ -323,9 +244,6 @@ def _build_filter_complex(
         group_v.append(v_label)
         group_a.append(a_label)
 
-    # ------------------------------------------------------------------
-    # 4. Hard-cut concat across all groups
-    # ------------------------------------------------------------------
     if len(groups) == 1:
         v_pre, a_pre = group_v[0], group_a[0]
     else:
@@ -333,9 +251,6 @@ def _build_filter_complex(
         parts.append(f"{interleaved}concat=n={len(groups)}:v=1:a=1[vpre][apre]")
         v_pre, a_pre = "vpre", "apre"
 
-    # ------------------------------------------------------------------
-    # 5. Final fade-in at the very start, fade-out at the very end
-    # ------------------------------------------------------------------
     v_final: list[str] = []
     a_final: list[str] = []
 
@@ -343,8 +258,7 @@ def _build_filter_complex(
         v_final.append(f"fade=t=in:st=0:d={in_fade}")
         a_final.append(f"afade=t=in:st=0:d={in_fade}")
     if out_fade > 0:
-        total = _total_duration(groups, infos, clips)
-        start = max(0.0, total - out_fade)
+        start = max(0.0, _total_duration(groups, infos, clips) - out_fade)
         v_final.append(f"fade=t=out:st={start:.3f}:d={out_fade}")
         a_final.append(f"afade=t=out:st={start:.3f}:d={out_fade}")
 
@@ -356,10 +270,6 @@ def _build_filter_complex(
     return ";".join(parts), v_pre, a_pre
 
 
-# ---------------------------------------------------------------------------
-# Progress helpers
-# ---------------------------------------------------------------------------
-
 def format_time(seconds: float) -> str:
     s = int(seconds)
     h, rem = divmod(s, 3600)
@@ -368,19 +278,12 @@ def format_time(seconds: float) -> str:
 
 
 def _run_with_progress(cmd: list[str], total_dur: float) -> None:
-    """Run an ffmpeg command and stream a live progress line to the console.
-
-    -progress pipe:1 must be placed as a global option (before -i flags) so
-    ffmpeg writes key=value progress data to stdout. A background thread drains
-    stderr concurrently to prevent the pipe buffer from filling and deadlocking.
-    """
+    """Run ffmpeg, streaming a live progress line to the console."""
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
 
-    # Drain stderr in a background thread to prevent pipe-buffer deadlock.
-    # ffmpeg writes filter graph analysis and encoder setup there before any
-    # progress data appears on stdout, which can fill the 64 KB buffer.
+    # Drain stderr concurrently; ffmpeg can fill the pipe before stdout progress starts.
     stderr_lines: list[str] = []
 
     def _drain_stderr() -> None:
@@ -411,7 +314,7 @@ def _run_with_progress(cmd: list[str], total_dur: float) -> None:
 
     proc.wait()
     stderr_thread.join()
-    print()  # move past the progress line
+    print()
 
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -419,16 +322,8 @@ def _run_with_progress(cmd: list[str], total_dur: float) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Main render entry point
-# ---------------------------------------------------------------------------
-
 def probe_script(script: VideoScript, *, verbose: bool = True) -> list[ClipInfo]:
-    """Probe every clip in the script, running silence detection where asked.
-
-    Detection results are cached per source file so a clip reused several times
-    in the timeline is only analysed once.
-    """
+    """Probe every clip, running silence detection where the script asks for it."""
     def log(msg: str) -> None:
         if verbose:
             print(msg)
@@ -440,6 +335,7 @@ def probe_script(script: VideoScript, *, verbose: bool = True) -> list[ClipInfo]
         info = probe_clip(clip.path)
 
         if clip.trim_silence and info.has_audio:
+            # Cached per source, so a clip reused in the timeline is analysed once.
             if clip.path not in cache:
                 log(f"    analysing silence: {clip.path.name}")
                 cache[clip.path] = compute_keep_intervals(
@@ -467,11 +363,7 @@ def render_script(
     *,
     verbose: bool = True,
 ) -> Path:
-    """Single-pass render: build filter_complex from the script, one ffmpeg call.
-
-    No intermediate files are written. All normalisation, crossfading, and
-    fading happens inside a single filter_complex graph.
-    """
+    """Render the script in one ffmpeg pass, writing no intermediate files."""
     output_path = script.output.file
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

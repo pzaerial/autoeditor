@@ -1,15 +1,4 @@
-"""Dead-space detection — find the loud (keep) regions of a recording.
-
-Uses two cheap audio-only ffmpeg passes per clip (no video decode):
-  1. `volumedetect` to measure the clip's peak loudness (max_volume, dB).
-  2. `silencedetect` with a noise floor set relative to that peak.
-
-The detected silences are inverted into the *loud* regions we want to keep
-(additive method), padded so we never clip the start/end of a word or action,
-merged where the remaining gap is too short to be worth cutting, and tiny
-isolated blips are dropped. The result is a list of (start, end) keep intervals
-in seconds, or None to mean "keep the whole clip unchanged".
-"""
+"""Dead-space detection -- find the loud (keep) regions of a recording."""
 
 import re
 import subprocess
@@ -24,11 +13,7 @@ _MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-?[0-9.]+)\s*dB")
 
 
 def _run_audio_filter(path: Path, audio_filter: str) -> str:
-    """Run an audio-only ffmpeg pass and return its stderr text.
-
-    `-vn` skips video decoding entirely, so this is fast even on long clips.
-    The null muxer discards output; we only care about the filter's log lines.
-    """
+    """Run an audio-only ffmpeg pass and return its stderr text."""
     result = subprocess.run(
         [
             "ffmpeg", "-hide_banner", "-nostats",
@@ -42,7 +27,7 @@ def _run_audio_filter(path: Path, audio_filter: str) -> str:
 
 
 def _measure_peak_db(path: Path) -> float | None:
-    """Return the clip's peak loudness in dB (max_volume), or None if unknown."""
+    """Return the clip's peak loudness in dB, or None if unknown."""
     stderr = _run_audio_filter(path, "volumedetect")
     match = _MAX_VOLUME_RE.search(stderr)
     return float(match.group(1)) if match else None
@@ -51,11 +36,7 @@ def _measure_peak_db(path: Path) -> float | None:
 def _detect_silences(
     path: Path, noise_db: float, min_silence: float, duration: float
 ) -> list[tuple[float, float]]:
-    """Return silent (start, end) intervals as detected by silencedetect.
-
-    A silence that runs to the end of the file emits a `silence_start` with no
-    matching `silence_end`; that trailing silence is closed at `duration`.
-    """
+    """Return silent (start, end) intervals as detected by silencedetect."""
     audio_filter = f"silencedetect=noise={noise_db:.1f}dB:d={min_silence}"
     stderr = _run_audio_filter(path, audio_filter)
 
@@ -72,6 +53,7 @@ def _detect_silences(
             silences.append((max(0.0, pending_start), float(end_match.group(1))))
             pending_start = None
 
+    # A silence running to the end of the file emits no silence_end.
     if pending_start is not None:
         silences.append((max(0.0, pending_start), duration))
 
@@ -94,13 +76,7 @@ def _invert(silences: list[tuple[float, float]], duration: float) -> list[tuple[
 def _pad_and_merge(
     keep: list[tuple[float, float]], padding: float, duration: float
 ) -> list[tuple[float, float]]:
-    """Pad each keep region and merge any that overlap after padding.
-
-    Two loud regions separated by a silence shorter than 2*padding overlap once
-    padded and collapse into one continuous clip, so the effective minimum cut
-    gap is max(min_silence, 2*padding). This is what stops the output from
-    fracturing into lots of jarring micro-cuts.
-    """
+    """Pad each keep region and merge any that overlap, avoiding micro-cuts."""
     padded = [
         (max(0.0, a - padding), min(duration, b + padding)) for a, b in keep
     ]
@@ -116,22 +92,15 @@ def _pad_and_merge(
 def compute_keep_intervals(
     path: Path, duration: float, settings: SilenceSettings
 ) -> list[tuple[float, float]] | None:
-    """Compute the loud (keep) intervals for a recording.
-
-    Returns None to mean "keep the whole clip unchanged" — used when no silence
-    is found, the peak can't be measured, or trimming would remove everything.
-    """
+    """Loud (keep) intervals for a recording; None means keep the whole clip."""
     peak_db = _measure_peak_db(path)
     if peak_db is None:
         return None
 
-    # Floor relative to the clip's own peak: anything quieter than
-    # (peak + threshold_db) is silence. threshold_db is negative.
+    # Floor relative to the clip's own peak, so it adapts to varying mic gain.
     noise_db = peak_db + settings.threshold_db
 
-    silences = _detect_silences(
-        path, noise_db, settings.min_silence, duration
-    )
+    silences = _detect_silences(path, noise_db, settings.min_silence, duration)
     if not silences:
         return None
 
@@ -141,7 +110,6 @@ def compute_keep_intervals(
 
     if not keep:
         return None
-    # Whole clip survives in one piece — nothing to cut.
     if len(keep) == 1 and keep[0][0] <= 0.0 and keep[0][1] >= duration:
         return None
 

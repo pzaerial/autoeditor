@@ -4,7 +4,7 @@ Episode notes go here.
 
 ## Output
 
-- file: `C:\Users\runya\Videos\pZ_aeriaL\out\Daily Dub #101: unc still got it.mp4`
+- file: `C:\Users\runya\Videos\pZ_aeriaL\out\Daily Dub #101 - unc still got it.mp4`
 - resolution: 1920x1080
 - fps: 60
 - encoder: libx264

@@ -139,5 +139,5 @@ with the line number, before any encoding starts.
 
 ## Worked example
 
-See [../example.md](../example.md) for the classic running order:
+See [../templates/example.md](../templates/example.md) for the classic running order:
 intro, deck tech, ad, transition, games with an ad in the middle, outro.

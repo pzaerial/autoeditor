@@ -1,12 +1,4 @@
-"""FullControl MTG -- Auto Editor.
-
-Renders a video from a markdown script:
-
-    python script.py myvideo.md
-
-Everything -- input files, output path, format and running order -- lives in
-the markdown file. There are no command-line flags.
-"""
+"""Render a video from a markdown script: python script.py myvideo.md"""
 
 import subprocess
 import sys
@@ -19,7 +11,6 @@ USAGE = "usage: python script.py <script.md>"
 
 
 def _check_tools() -> None:
-    """Fail early with a clear message when ffmpeg is not installed."""
     for tool in ("ffmpeg", "ffprobe"):
         try:
             subprocess.run([tool, "-version"], capture_output=True, check=True)
@@ -57,16 +48,13 @@ def main(argv: list[str]) -> int:
 
     print("\n  Probing clips...")
     infos = probe_script(script)
-
-    total = sum(info.effective_duration for info in infos)
-    print(f"  Source material: {format_time(total)}")
+    print(f"  Source material: {format_time(sum(i.effective_duration for i in infos))}")
 
     try:
         output = render_script(script, infos)
     except subprocess.CalledProcessError as exc:
         print("\nffmpeg failed:", file=sys.stderr)
-        tail = (exc.stderr or "").strip().splitlines()[-20:]
-        print("\n".join(tail), file=sys.stderr)
+        print("\n".join((exc.stderr or "").strip().splitlines()[-20:]), file=sys.stderr)
         return 1
 
     print(f"Done -> {output}")

@@ -1,10 +1,4 @@
-"""Data model for a parsed markdown video script.
-
-A script is a list of `TimelineClip`s plus output/silence settings. Each clip
-carries the *join* describing how it attaches to the clip before it, so the
-whole edit is expressible as a flat ordered list — no hard-coded assembly
-order lives in the code any more.
-"""
+"""Data model for a parsed markdown video script."""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -17,9 +11,9 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".wmv", ".f
 class Join(Enum):
     """How a clip attaches to the one before it."""
 
-    CUT = "cut"              # hard cut, no blending
-    CROSSFADE = "crossfade"  # xfade / acrossfade between the two clips
-    FADE = "fade"            # previous fades to black, this one fades up
+    CUT = "cut"
+    CROSSFADE = "crossfade"
+    FADE = "fade"
 
 
 @dataclass
@@ -47,13 +41,10 @@ class SilenceSettings:
     min_silence: float = 1.0
     min_segment: float = 0.5
 
-    def key(self) -> tuple:
-        return (self.threshold_db, self.padding, self.min_silence, self.min_segment)
-
 
 @dataclass
 class Defaults:
-    """Fallbacks applied to timeline items that do not state their own."""
+    """Fallbacks for timeline items that do not state their own."""
 
     join: Join = Join.CROSSFADE
     crossfade: float = 0.3
@@ -81,7 +72,7 @@ class VideoScript:
     clips: list[TimelineClip] = field(default_factory=list)
 
     def describe(self) -> str:
-        """Human-readable rundown of the edit, printed before rendering."""
+        """Rundown of the edit, printed before rendering."""
         width = max((len(c.label) for c in self.clips), default=0)
         lines = []
         for i, clip in enumerate(self.clips, 1):
