@@ -15,7 +15,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from .config import Config
+from .timeline import SilenceSettings
 
 
 _SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[0-9.]+)")
@@ -114,7 +114,7 @@ def _pad_and_merge(
 
 
 def compute_keep_intervals(
-    path: Path, duration: float, config: Config
+    path: Path, duration: float, settings: SilenceSettings
 ) -> list[tuple[float, float]] | None:
     """Compute the loud (keep) intervals for a recording.
 
@@ -126,18 +126,18 @@ def compute_keep_intervals(
         return None
 
     # Floor relative to the clip's own peak: anything quieter than
-    # (peak + THRESHOLD_DB) is silence. THRESHOLD_DB is negative.
-    noise_db = peak_db + config.dead_space_threshold_db
+    # (peak + threshold_db) is silence. threshold_db is negative.
+    noise_db = peak_db + settings.threshold_db
 
     silences = _detect_silences(
-        path, noise_db, config.dead_space_min_silence, duration
+        path, noise_db, settings.min_silence, duration
     )
     if not silences:
         return None
 
     keep = _invert(silences, duration)
-    keep = _pad_and_merge(keep, config.dead_space_padding, duration)
-    keep = [(a, b) for a, b in keep if b - a >= config.dead_space_min_segment]
+    keep = _pad_and_merge(keep, settings.padding, duration)
+    keep = [(a, b) for a, b in keep if b - a >= settings.min_segment]
 
     if not keep:
         return None

@@ -1,49 +1,48 @@
 # Architecture
 
 ```
-main.py                  — entry point, calls cli()
-.env / .env.example      — all configuration
+script.py                — entry point: python script.py myvideo.md
+myvideo.md               — the edit: paths, order, format (see script-format.md)
 autoeditor/
-    config.py            — load_config() → Config dataclass from .env
-    project.py           — scan_project() → ProjectFolder (deck_tech + games list)
-    pipeline.py          — build_pipeline() → list[Segment] in assembly order
+    timeline.py          — data model: VideoScript, TimelineClip, Join, settings
+    script_parser.py     — parse_script() → VideoScript from a markdown file
     silence.py           — compute_keep_intervals() → loud regions for dead-space removal
     ffmpeg_ops.py        — all ffmpeg work: probe, normalize, xfade, concat, fades
-    cli.py               — click CLI: run / process / batch commands
 ```
 
-## config.py
-`load_config()` reads `.env` and returns a typed `Config` dataclass. Asset paths are `Path | None` — unset = skipped.
+There is no `.env`, no click CLI and no hard-coded assembly order — the markdown script is the only input.
 
-## project.py
-`scan_project(folder)` sorts video files by mtime then name. First file = **deck tech**, rest = **games**.
-`scan_projects_folder(root)` iterates subdirectories for batch mode.
+## timeline.py
+Pure data, no logic. `VideoScript` holds `OutputSettings`, `SilenceSettings`, `Defaults` and an ordered `list[TimelineClip]`.
 
-Project folders are named `YYYY.MM.DD-deck-name` (e.g. `2026.03.13-jeskai-control`).
+Each `TimelineClip` carries the `Join` describing how it attaches to the clip **before** it (`CUT`, `CROSSFADE`, `FADE`) plus that join's duration, so the whole edit is a flat list. `VideoScript.describe()` renders the summary printed before a render.
 
-## pipeline.py
-`build_pipeline(project, config)` returns `list[Segment]`. Each `Segment` has a `SegmentType` enum (`INTRO`, `OUTRO`, `TRANSITION`, `DECK_TECH`, `GAME`, `MIDROLL_AD`) and a `Path`.
-`describe_pipeline()` returns a human-readable string used by `--dry-run`.
+## script_parser.py
+`parse_script(path)` → `VideoScript`, raising `ScriptError` (which carries a line number) on any problem.
+
+Only two line shapes are meaningful: `#` headings open sections, and list items carry values. Everything else — prose, blockquotes, fenced blocks — is skipped, so scripts double as episode notes. Unknown sections warn; unknown keys and options are hard errors listing the valid ones.
+
+Section aliases live in `_SECTION_ALIASES`; key aliases in `_OUTPUT_KEYS` / `_SILENCE_KEYS` / `_DEFAULT_KEYS`. Keys are normalised by `_norm_key` so `Fade In`, `fade_in` and `**fade-in**` all match.
+
+`_build_clips` resolves each timeline item: asset aliases → paths, relative paths → against the script's own folder, then `_expand_source` turns folders and globs into their video files (sorted by mtime then name). A `crossfade`/`fade` of zero length collapses to `CUT` here, so the filter graph never sees a degenerate blend.
 
 ## silence.py
-`compute_keep_intervals(path, duration, config)` → `list[(start,end)] | None` (None = keep whole clip).
-Two audio-only ffmpeg passes per clip: `volumedetect` (peak `max_volume`) then `silencedetect` with `noise = peak + DEAD_SPACE_THRESHOLD_DB`. Silences are inverted into loud regions, padded, merged (gaps `< 2×padding`), and tiny segments dropped. Called from `render_project` for `GAME` segments only.
+`compute_keep_intervals(path, duration, settings)` → `list[(start,end)] | None` (None = keep whole clip).
+Two audio-only ffmpeg passes per clip: `volumedetect` (peak `max_volume`) then `silencedetect` with `noise = peak + threshold_db`. Silences are inverted into loud regions, padded, merged (gaps `< 2×padding`), and tiny segments dropped. Called from `probe_script` for clips marked `trim silence`.
 
 ## ffmpeg_ops.py
 Single-pass architecture — all source clips are inputs to one ffmpeg call. No intermediate files.
 
 - `probe_clip(path)` → `ClipInfo` (duration, resolution, fps, has_audio)
-- `_split_into_groups(segments)` → groups segments at midroll ad boundaries; each midroll is isolated as a single-item group
-- `_group_duration(indices, clips, fade_dur)` → effective output duration of a group after xfade overlap
-- `render_project` also runs dead-space detection (via `silence.py`) for `GAME` clips, storing `keep_intervals` on `ClipInfo`. `ClipInfo.effective_duration` reflects the post-trim length and is used everywhere durations feed xfade offsets / fades / progress.
-- `_build_filter_complex(clips, groups, config)` → builds the complete filter_complex string:
-  - Per-clip: when `keep_intervals` is set, `split → trim/atrim each interval → concat` to drop dead space in-graph; then `scale/pad/fps/format` for video; `aresample/aformat` for audio; `aevalsrc` for clips with no audio track
-  - Per-group: `xfade`+`acrossfade` chain (or hard `concat` if `FADE_DURATION=0`); `fade=out`+`afade=out` on groups before midrolls
-  - Final: `concat` across all groups, then `fade=in/out`+`afade=in/out` on the assembled output
-- `render_project(segments, output, config)` → probes all clips, calls `_build_filter_complex`, runs one ffmpeg command
+- `probe_script(script)` → `list[ClipInfo]`, running silence detection where the script asks for it. Results are cached per source path, so a clip reused across the timeline is analysed once. `ClipInfo.effective_duration` reflects the post-trim length and feeds every xfade offset, fade position and progress total.
+- `_split_into_groups(clips)` → runs of clips joined by `CROSSFADE`; `CUT` and `FADE` joins end a group
+- `_group_duration(indices, infos, clips)` → a group's output length after xfade overlap (per-join durations, not one global value)
+- `_build_filter_complex(infos, clips, groups, script)` → the complete filter_complex string:
+  - Per-clip: when `keep_intervals` is set, `split → trim/atrim each interval → concat` to drop dead space in-graph; then `scale/pad/fps/format/setsar` for video, `aresample/aformat` for audio, `anullsrc` for clips with no audio track
+  - Per-group: `xfade`+`acrossfade` chain across the group's clips
+  - At `FADE` boundaries: `fade=out`/`afade=out` on the group before, `fade=in`/`afade=in` on the group after
+  - Final: `concat` across all groups, then the output's own `fade=in/out`+`afade=in/out`
+- `render_script(script, infos)` → builds the graph and runs one ffmpeg command with live progress
 
-## cli.py
-Three commands, all support `--dry-run`:
-- `run` — reads `PROCESS_MULTI` from `.env`, routes to single or batch automatically
-- `process FOLDER` — explicit single project folder
-- `batch FOLDER` — explicit multi-project root folder
+## script.py
+Prints the resolved script, honours `dry run`, checks ffmpeg/ffprobe are on PATH, then probes and renders. Reports `ScriptError` with the offending line and prints the tail of ffmpeg's stderr if the encode fails.

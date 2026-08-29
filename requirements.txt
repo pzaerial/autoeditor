@@ -1,3 +1,2 @@
-ffmpeg-python
-python-dotenv
-click
+# No third-party dependencies -- stdlib only.
+# Requires ffmpeg and ffprobe on PATH.

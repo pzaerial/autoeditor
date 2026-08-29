@@ -1,40 +1,67 @@
 # Video Pipeline
 
-## Assembly order (N games)
+The assembly order is whatever the script's `## Timeline` says. Nothing in the
+code knows what an intro, a deck tech or a midroll ad is — those are just clips
+with joins.
+
+## From script to output
 
 ```
-Intro → Deck Tech → Midroll Ad 1 → Transition
-      → Game 1 → T → ... → Game ⌈N/2⌉  [fade out]
-      → Midroll Ad 2
-      → Game ⌈N/2⌉+1 → T → ... → Game N
-      → Outro
+myvideo.md
+  → parse_script()    → VideoScript (clips, each with a Join to the one before)
+  → probe_script()    → ClipInfo per clip (+ keep_intervals where silence is trimmed)
+  → _split_into_groups() → runs of crossfaded clips
+  → _build_filter_complex() → one filter_complex string
+  → one ffmpeg call   → output.mp4
 ```
 
-## Rules
+## Joins
 
-- Transition plays **after Midroll Ad 1**, immediately before Game 1.
-- No transition before Midroll Ad 1, or on either side of Midroll Ad 2 — always hard cuts.
-- The content group immediately before each midroll ad fades out to black (`OUTPUT_FADE_DURATION`) before the hard cut.
-- Midroll Ad 2 is only inserted when there are ≥ 2 games; it splits the games at `ceil(num_games / 2)`.
-- Any asset with no path set or `_ENABLED=false` is silently skipped.
-- Global fade-in at the very start and fade-out at the very end of the final output.
+Each timeline item states how it attaches to the clip before it:
 
-## Rendering steps ()
+| Join | Effect |
+|---|---|
+| `crossfade d` | `xfade` + `acrossfade` of `d` seconds. Clips stay in the same group. |
+| `cut` | Hard cut. Ends the current group. |
+| `fade d` | Previous group fades to black over `d`, this one fades up over `d`, hard cut between. Ends the current group. |
 
-0. **Dead-space detection** (preprocess, `REMOVE_DEAD_SPACE=true`) — for each `GAME` clip, measure peak loudness and run `silencedetect` (floor relative to peak), invert to loud regions, pad + merge + drop tiny → `keep_intervals`. In-graph `trim`/`atrim` + `concat` drops the silence during normalization (step 1); no intermediate files.
-1. **Normalize** all clips — h264/aac 48kHz stereo, target resolution (letterboxed), target FPS. Silent audio synthesised if source has no audio track.
-2. **Split into groups** — midroll ads are isolated as single-item groups; all other consecutive segments form content groups.
-3. **Render each group:**
-   - 2+ clips + `FADE_DURATION > 0`: chain `xfade` (video) + `acrossfade` (audio)
-   - 1 clip or `FADE_DURATION=0`: stream-copied directly
-   - If next group is a midroll: apply `apply_fade_out` pass on this group's rendered output
-4. **Hard-cut concat** all group outputs via concat demuxer (`-c copy`)
-5. **Final fades** — `fade`/`afade` in+out on the fully assembled file
+A `crossfade` or `fade` of `0` is collapsed to a `cut` at parse time, so the
+filter graph never contains a zero-length blend.
+
+## Grouping
+
+A **group** is a maximal run of clips joined by `crossfade`. Groups exist
+because an xfade chain has to be built as one connected filter chain, while
+`cut` and `fade` boundaries are plain concatenation.
+
+```
+intro  deck-tech   ad     transition  game-1   transition  game-2   outro
+      ×crossfade  ×fade  ×cut        ×crossfade ×crossfade ×crossfade ×fade
+└──── group 0 ────┘└ g1 ┘└──────────── group 2 ────────────┘└─ g3 ─┘
+```
+
+## Rendering steps
+
+0. **Dead-space detection** (for clips marked `trim silence`) — measure peak loudness, run `silencedetect` with a floor relative to that peak, invert to loud regions, pad + merge + drop tiny → `keep_intervals`. Cached per source file.
+1. **Normalize** every clip — target resolution (letterboxed via `scale`+`pad`), target fps, `yuv420p`, `setsar=1`; audio to 48 kHz stereo fltp. Clips with `keep_intervals` are `split`/`trim`/`concat`ed first so the silence is gone before normalisation. Clips with no audio track get an `anullsrc` silent track of matching length.
+2. **Crossfade within each group** — an `xfade`/`acrossfade` chain. Each pair may use a different duration.
+3. **Fade at group boundaries** — a `fade` join adds `fade=out`/`afade=out` to the group before it and `fade=in`/`afade=in` to the group after.
+4. **Concat all groups** — hard cuts, in one `concat` filter.
+5. **Final fades** — the output's `fade in` / `fade out` on the fully assembled stream.
+
+Steps 0–5 are a single ffmpeg invocation; only step 0 runs separate (audio-only, no video decode) passes beforehand.
 
 ## xfade offset formula
 
-For clip `i` in a chain of N clips with crossfade duration `d`:
+Durations can differ per join, so the offset is tracked as a running total of
+the chain's own output length rather than a closed form:
 
 ```
-offset_i = sum(durations[0..i]) - (i + 1) * d
+acc = duration[0]
+for each following clip i with join duration d:
+    offset = acc - d
+    acc    = acc + duration[i] - d
 ```
+
+`acc` at the end is the group's output duration, which is also what the
+group-boundary fade-out position and the total-duration progress bar use.

@@ -1,276 +1,154 @@
 # FullControl MTG – Auto Editor
+Markdown driven video autoeditor written in Python.
 
-A Python CLI tool for automatically stitching Magic: The Gathering content videos together using ffmpeg. Point it at a folder of raw recordings and it produces a fully assembled, ready-to-upload video with intros, outros, transitions, midroll ads, and audio/video fades — all driven by a single `.env` config file.
+```
+python script.py myvideo.md
+```
+
+Control your video format by writing a markdown file.
+
+## Quick start
+
+Copy [example.md](example.md), point the paths at your own files, and run it:
+
+```
+python script.py example.md
+```
+
+Set `dry run: yes` in the `## Output` section to print the resolved timeline without rendering — a fast way to check every path and join before committing to an encode.
 
 ---
 
-## Requirements
+## The script format
 
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/download.html) and `ffprobe` installed and available on your `PATH`
+A script is ordinary markdown. `##` headings open sections, and the list items inside them carry the settings. Anything that isn't a heading or a list item — paragraphs, blockquotes, fenced code — is ignored, so a script doubles as your notes for the episode.
 
----
+```markdown
+# 2026.03.13 Jeskai Control
 
-## Setup
+## Output
+- file: C:\Users\you\Videos\out\jeskai.mp4
+- resolution: 1920x1080
+- fps: 60
 
-**1. Create and activate a virtual environment:**
+## Defaults
+- crossfade: 0.3
+- trim silence: no
 
-```bash
-python -m venv .venv
-source .venv/bin/activate   (*nix)
-.venv\Scripts\activate   (Windows)
+## Assets
+- intro: C:\Users\you\Videos\assets\intro.mp4
+- transition: C:\Users\you\Videos\assets\transition.mp4
+- ad 1: C:\Users\you\Videos\assets\midroll_1.mp4
+
+## Timeline
+1. `intro`
+2. `C:\Users\you\Videos\raw\jeskai\deck-tech.mp4` -- trim silence
+3. `ad 1` -- fade
+4. `transition` -- cut
+5. `C:\Users\you\Videos\raw\jeskai\games` -- trim silence
+6. `intro` -- fade
 ```
 
-**2. Install dependencies:**
+Full reference: [.claude/script-format.md](.claude/script-format.md).
 
-```bash
-pip install -r requirements.txt
-```
+### Sections
 
-**3. Copy the example config and fill in your values:**
-
-```bash
-cp .env.example .env
-```
-
-**4.** Edit `.env` with your asset paths and preferences (see [Configuration](#configuration) below).
-
-**5.** Place your project recording folders inside the folder pointed to by `PROJECT_FOLDER_PATH`.
-
----
-
-## Project Folder Structure
-
-Each project is a folder named in the format `YYYY.MM.DD-deck-name`, containing the raw video recordings as `.mp4` or `.mov` files:
-
-```
-input/
-└── 2026.03.13-jeskai-control/
-    ├── 2026-03-13 21-04-11.mp4   ← deck tech  (earliest by modified date)
-    ├── 2026-03-13 21-34-55.mp4   ← game 1
-    ├── 2026-03-13 21-58-22.mp4   ← game 2
-    ├── 2026-03-13 22-17-40.mp4   ← game 3
-    └── 2026-03-13 22-45-03.mp4   ← game 4
-```
-
-- **Deck tech** — the first video file by modification date.
-- **Games** — all remaining files in modification date order.
-
-Supported input formats: `.mp4`, `.mov`, `.mkv`, `.avi`.
-
----
-
-## Default Pipeline
-
-For a project with **N games**, the assembled output follows this order:
-
-```
-Intro → Deck Tech → Midroll Ad 1 → Transition
-      → Game 1 → Transition → ... → Game ⌈N/2⌉ [fade out]
-      → Midroll Ad 2
-      → Game ⌈N/2⌉+1 → Transition → ... → Game N
-      → Outro
-```
-
-**Rules:**
-- The transition clip plays after Midroll Ad 1, immediately before Game 1.
-- There is no transition before Midroll Ad 1, or on either side of Midroll Ad 2.
-- The content group immediately preceding each midroll ad fades out to black before the hard cut.
-- Midroll Ad 2 is only inserted when there are 2 or more games (it splits the games roughly in half).
-- Any asset whose path is unset or whose enabled flag is `false` is silently skipped.
-- A global fade-in is applied to the very first frame of the output; a fade-out is applied to the very last.
-
-**Example — 5 games:**
-
-```
-Intro → Deck Tech [fade out] → Midroll Ad 1 → Transition
-      → Game 1 → T → Game 2 → T → Game 3 [fade out]
-      → Midroll Ad 2
-      → Game 4 → T → Game 5
-      → Outro
-```
-
----
-
-## Features
-
-- **Automatic pipeline assembly** — intro, outro, transition clips, and midroll ads are inserted in the correct order automatically based on the number of games in the project folder.
-- **Batch or single-project processing** — process an entire folder of projects in one run, or target a single project folder, controlled by a flag in `.env`.
-- **Dead-space removal** — long silences are automatically trimmed out of game recordings using peak-relative silence detection, with padding and clip-merging to keep the result smooth. Applied inside the single render pass (see below).
-- **Crossfade between clips** — configurable `xfade` / `acrossfade` crossfades between content clips within a group for smooth transitions.
-- **Hard cuts around ads** — midroll ads always cut in and out cleanly with no crossfade bleed.
-- **Global fade-in / fade-out** — the final output video fades up from black at the start and fades to black at the end.
-- **Mixed format support** — accepts `.mp4`, `.mov`, `.mkv`, and `.avi` source files. All clips are normalised to a common format (h264/aac) before stitching.
-- **Resolution and FPS normalisation** — all clips are scaled (with letterbox/pillarbox padding) and resampled to the configured target resolution and frame rate.
-- **Missing audio handling** — clips with no audio track (e.g. silent transition overlays) automatically receive a synthesised silent audio stream so the concat pipeline never breaks.
-- **Midroll ad toggles** — each midroll ad can be enabled or disabled independently in `.env` without removing its path, useful for toggling ads per-upload.
-- **Dry-run mode** — preview the full pipeline order for every project without rendering anything.
-- **Temporary file cleanup** — intermediate normalised clips and group renders are written to a `_tmp_` folder beside the output and deleted automatically on completion.
-
----
-
-## Commands
-
-All commands are run from the project root:
-
-```bash
-python main.py <command> [options]
-```
-
----
-
-### `run` — Normal entry point
-
-Reads `PROJECT_FOLDER_PATH` and `PROCESS_MULTI` from `.env` and routes automatically.
-
-```bash
-python main.py run [--dry-run]
-```
-
-| `PROCESS_MULTI` | Behaviour |
+| Section | Purpose |
 |---|---|
-| `false` | `PROJECT_FOLDER_PATH` is treated as the single project folder to process |
-| `true` | `PROJECT_FOLDER_PATH` is treated as the parent folder; all subfolders are processed |
+| `# Title` | The episode name. Cosmetic — printed when rendering. |
+| `## Output` | Where the finished file goes and what format it is. |
+| `## Defaults` | Fallbacks for timeline items that don't state their own. |
+| `## Silence` | Tuning for dead-space removal. |
+| `## Assets` | Named shortcuts for clips you reuse (`intro`, `ad 1`, …). |
+| `## Timeline` | The running order. This is the edit. |
 
-**Examples:**
+### Output
 
-```bash
-# Render based on .env settings
-python main.py run
-
-# Preview pipeline(s) without rendering
-python main.py run --dry-run
-```
-
----
-
-### `process` — Single project (explicit path)
-
-Process one specific project folder, ignoring `PROCESS_MULTI`.
-
-```bash
-python main.py process FOLDER [--output PATH] [--dry-run]
-```
-
-| Argument / Option | Description |
-|---|---|
-| `FOLDER` | Path to the project folder (the `YYYY.MM.DD-deck-name` directory) |
-| `--output`, `-o` | Output file path. Defaults to `<OUTPUT_FOLDER>/<project-name>.mp4` |
-| `--dry-run` | Print the pipeline without rendering |
-
-**Examples:**
-
-```bash
-python main.py process "./input/2026.03.13-jeskai-control"
-
-python main.py process "./input/2026.03.13-jeskai-control" --output "./output/jeskai.mp4"
-
-python main.py process "./input/2026.03.13-jeskai-control" --dry-run
-```
-
----
-
-### `batch` — Multiple projects (explicit path)
-
-Process all project subfolders inside a given root folder, ignoring `PROCESS_MULTI`.
-
-```bash
-python main.py batch FOLDER [--dry-run]
-```
-
-| Argument / Option | Description |
-|---|---|
-| `FOLDER` | Path to the parent folder containing project subfolders |
-| `--dry-run` | Print pipelines without rendering |
-
-**Examples:**
-
-```bash
-python main.py batch "./input"
-
-python main.py batch "./input" --dry-run
-```
-
----
-
-## Configuration
-
-Copy `.env.example` to `.env` and edit as needed. All paths accept forward slashes on Windows. Wrap paths containing spaces in double quotes.
-
-```ini
-# Use forward slashes, even on Windows
-# Wrap paths with spaces in double quotes: PROJECT_FOLDER_PATH="C:/My Videos/input"
-```
-
-| Variable | Description | Default |
+| Key | Default | Description |
 |---|---|---|
-| `INTRO_PATH` | Path to the intro video clip | *(unset — skipped)* |
-| `OUTRO_PATH` | Path to the outro video clip | *(unset — skipped)* |
-| `TRANSITION_PATH` | Path to the transition video clip inserted between games | *(unset — skipped)* |
-| `MIDROLL_AD_PATH_1` | Path to midroll ad 1 (placed after deck tech) | *(unset — skipped)* |
-| `MIDROLL_AD_PATH_2` | Path to midroll ad 2 (placed halfway through games) | *(unset — skipped)* |
-| `MIDROLL_AD_1_ENABLED` | Set to `false` to skip midroll ad 1 without removing its path | `true` |
-| `MIDROLL_AD_2_ENABLED` | Set to `false` to skip midroll ad 2 without removing its path | `true` |
-| `PROJECT_FOLDER_PATH` | Project folder (single mode) or parent of project folders (multi mode) | `./input` |
-| `OUTPUT_FOLDER` | Folder where rendered `.mp4` files are written | `./output` |
-| `PROCESS_MULTI` | `true` = batch mode, `false` = single project mode | `true` |
-| `TARGET_RESOLUTION` | Output resolution (`WxH`) | `3440x2160` |
-| `TARGET_FPS` | Output frame rate | `60` |
-| `FADE_DURATION` | Crossfade duration in seconds between clips within a group. `0` = hard cuts | `0.3` |
-| `OUTPUT_FADE_DURATION` | Fade-in / fade-out duration in seconds on the final output. `0` = no fade | `0.5` |
-| `VIDEO_ENCODER` | ffmpeg video encoder: `libx264` (CPU), `h264_nvenc` (NVIDIA), `h264_amf` (AMD), `h264_qsv` (Intel) | `libx264` |
-| `REMOVE_DEAD_SPACE` | Trim long silences out of game recordings (assets and deck tech untouched) | `true` |
-| `DEAD_SPACE_PADDING` | Buffer (seconds) kept around each loud region; also the merge threshold for adjacent clips | `0.5` |
-| `DEAD_SPACE_THRESHOLD_DB` | Silence floor in dB below each clip's peak loudness. More negative = less aggressive | `-30` |
-| `DEAD_SPACE_MIN_SILENCE` | Minimum silence length (seconds) before it is eligible to be cut | `1.0` |
-| `DEAD_SPACE_MIN_SEGMENT` | Drop kept regions shorter than this (seconds) to avoid jarring blips | `0.5` |
+| `file` | *required* | The `.mp4` to write. Parent folders are created for you. |
+| `resolution` | `1920x1080` | Output size as `WxH`. Sources are letterboxed to fit. |
+| `fps` | `60` | Output frame rate. |
+| `encoder` | `libx264` | `libx264` (CPU), `h264_nvenc` (NVIDIA), `h264_amf` (AMD), `h264_qsv` (Intel). |
+| `fade in` | `0.5` | Fade up from black at the very start, in seconds. |
+| `fade out` | `0.5` | Fade to black at the very end, in seconds. |
+| `dry run` | `no` | `yes` prints the resolved timeline and stops. |
+
+### Defaults
+
+| Key | Default | Description |
+|---|---|---|
+| `join` | `crossfade` | How clips attach when the timeline item doesn't say. |
+| `crossfade` | `0.3` | Default crossfade length in seconds. |
+| `fade` | `0.5` | Default fade-through-black length in seconds. |
+| `trim silence` | `no` | Whether clips get dead-space removal by default. |
+
+### Silence
+
+Dead-space removal is per clip and relative to that clip's own peak loudness, so it adapts to different mic gain between sessions.
+
+| Key | Default | Description |
+|---|---|---|
+| `threshold` | `-30 dB` | Silence floor **below the clip's peak**. More negative = less aggressive. |
+| `padding` | `0.5` | Seconds kept around each loud region. Gaps shorter than `2×` this merge. |
+| `min silence` | `1.0` | A silence must run this long before it's eligible to be cut. |
+| `min segment` | `0.5` | Kept regions shorter than this are dropped. |
+
+### Timeline
+
+Each item is a file, folder, glob or asset name, optionally followed by `--` and a comma-separated list of options:
+
+```markdown
+1. `intro`
+2. `C:\Footage\ep12\game-1.mp4` -- crossfade 0.5, trim silence
+3. `C:\Assets\ad.mp4` -- fade
+```
+
+| Option | Meaning |
+|---|---|
+| `cut` | Hard cut from the previous clip. |
+| `crossfade [seconds]` | Blend with the previous clip. Uses the default length if unstated. |
+| `fade [seconds]` | Previous clip fades to black, this one fades up from it. |
+| `trim silence` | Remove dead air from this clip. |
+| `keep silence` | Leave this clip's dead air alone (overrides the default). |
+
+Options describe how a clip attaches to the one **before** it, so they're read top-down like a cut list. The first item's join is ignored.
+
+The separator can be `--`, an em dash, or `|`. Numbered and bulleted lists both work.
+
+### Paths
+
+- Windows paths work as-is: `C:\Users\you\Videos\clip.mp4`.
+- **Spaces need no escaping or quoting** — `C:\My Clips\game 1.mp4` is fine, as are `#`, `&`, `'` and `!`.
+- Relative paths resolve against the folder holding the markdown file.
+- Backticks or quotes around a path are optional — use them if the path contains `--`.
+- `: < > " | ? *` are **not** valid in a Windows file or folder name. A `:` is the dangerous one: Windows silently writes an empty file plus a hidden data stream instead of failing, so the output path is checked up front and rejected with a suggested replacement.
+- Environment variables (`%USERPROFILE%`, `$HOME`) and `~` are expanded.
+- A **folder** expands to every video inside it, sorted by modification time then name.
+- A **glob** (`raw\ep12\game-*.mp4`) expands the same way.
+
+When a folder or glob expands to several clips, they all take the item's join and options — so `` `C:\raw\ep12` -- crossfade 0.3, trim silence `` crossfades the whole recording session together.
+
+Supported input formats: `.mp4`, `.mov`, `.mkv`, `.avi`, `.m4v`, `.webm`, `.wmv`, `.flv`.
 
 ---
 
-## Dead Space Removal
+## How it renders
 
-When `REMOVE_DEAD_SPACE=true`, each **game recording** is scanned for long silent
-stretches, which are cut out before stitching — a hands-off "jump cut" pass. The
-deck tech and branded assets (intro, outro, transition, midroll ads) are never
-touched.
+Everything happens in **one ffmpeg pass** with no intermediate files. Each clip is normalised (scaled and letterboxed to the target resolution, resampled to the target fps, audio to 48 kHz stereo), then:
 
-How it works:
+- Runs of clips joined by `crossfade` are blended together with an `xfade`/`acrossfade` chain.
+- `cut` and `fade` joins break those runs apart and hard-cut between them; a `fade` join dips both sides to black first.
+- The assembled video gets its final fade-in and fade-out.
 
-1. Each clip's **peak loudness** is measured, and the silence floor is set
-   *relative to that peak* (`DEAD_SPACE_THRESHOLD_DB` below it). This adapts
-   automatically to different mic gain between recording sessions, rather than
-   relying on a fragile fixed dBFS value.
-2. `ffmpeg`'s `silencedetect` finds silences longer than `DEAD_SPACE_MIN_SILENCE`.
-3. The **loud regions** between them are kept (additive method), each padded by
-   `DEAD_SPACE_PADDING` so word and action edges are never clipped.
-4. Kept regions separated by a gap shorter than `2 × DEAD_SPACE_PADDING` **merge**
-   into one continuous clip, and isolated blips shorter than `DEAD_SPACE_MIN_SEGMENT`
-   are dropped — together these prevent a fractured, choppy result.
+Clips marked `trim silence` are analysed first with two cheap audio-only passes (`volumedetect` for the peak, then `silencedetect` with a floor relative to it). The loud regions are padded, merged and trimmed in-graph, so no re-encode happens twice.
 
-Trimming happens **inside the single render pass** (via `trim`/`atrim` + `concat`
-in the filter graph), so there are no intermediate files and content is encoded
-only once. Detection itself uses two fast audio-only probes per clip (no video
-decode).
+Progress is reported live while ffmpeg runs.
 
 ---
 
-## Asset Folder Suggestion
+## Notes
 
-```
-assets/
-├── intro.mp4
-├── outro.mp4
-├── transition.mp4
-├── midroll_1.mp4
-└── midroll_2.mp4
-
-input/
-├── 2026.03.13-jeskai-control/
-│   └── *.mp4
-└── 2026.03.17-mono-red/
-    └── *.mp4
-
-output/
-├── 2026.03.13-jeskai-control.mp4
-└── 2026.03.17-mono-red.mp4
-```
+- The same clip can appear in the timeline as many times as you like; silence analysis is cached per file.
+- A clip with no audio track gets a silent one synthesised so the concat stays in sync.
+- `crossfade 0` is treated as a `cut`.
