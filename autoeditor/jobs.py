@@ -9,6 +9,7 @@ import re
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 from .loudness import MAX_GAIN_DB, balance_gain, measure_loudness
 from .probe import probe_clip, probe_script
@@ -225,7 +226,9 @@ class RenderJob:
             self._stage("finish", "running")
             with self.lock:
                 self.state = "done"
-                self.output = str(script.output.file)
+                # Absolute, so "open output folder" does not have to guess
+                # which working directory a relative path was meant against.
+                self.output = str(Path(script.output.file).resolve())
                 self.progress["pct"] = 100.0
             self._stage("finish", "done", str(script.output.file))
             self.say(f"Done: {script.output.file}")

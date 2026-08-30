@@ -19,7 +19,7 @@ export const state = {
   template: "",      // path of the script this project was opened from
   page: "settings",
   poll: null,
-  render: { log: [], count: 0, samples: [], hasGpu: false },
+  render: { log: [], count: 0, samples: [], hasGpu: false, output: "" },
 };
 
 export function blankProject() {

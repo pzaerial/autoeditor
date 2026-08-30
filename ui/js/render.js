@@ -69,7 +69,11 @@ $("btn-cancel").addEventListener("click", async () => {
 });
 
 $("btn-reveal").addEventListener("click", async () => {
-  const target = state.project.output.file;
+  // Prefer where the render actually wrote. That path is absolute, whereas the
+  // form field is whatever was typed -- and a relative one leaves the file
+  // manager guessing at a working directory it does not share.
+  const target = state.render.output || state.project.output.file;
+  if (!target) return toast("Set an output file first.", true);
   try {
     // The desktop shell can take the foreground; a backend on localhost cannot,
     // so the folder it opens lands behind the app window. Prefer the bridge.
@@ -231,6 +235,7 @@ export async function pollRender() {
       : "Idle";
 
   drawStages(status.stages);
+  if (status.output) state.render.output = status.output;
 
   // The server hands back only what we have not seen; a reset job rewinds us.
   if (status.log_total < state.render.count) {

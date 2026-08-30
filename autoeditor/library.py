@@ -129,14 +129,31 @@ def reveal(target: Path) -> bool:
     a folder opened from here can land behind the app window. This is the path a
     plain browser takes, and the fallback if the bridge is missing.
     """
+    # A relative path is resolved the same way the render resolves it -- against
+    # the working directory -- so the two always mean the same folder. Explorer
+    # cannot follow a relative path at all and silently opens Documents instead.
+    target = target.expanduser()
+    if not target.is_absolute():
+        target = (Path.cwd() / target).resolve()
+
     if not target.exists() and not target.parent.is_dir():
         return False
 
     if sys.platform == "win32":
+        # Passed as one string, not a list. A list makes Python quote the whole
+        # argument -- `explorer "/select,C:\...\My File.mp4"` -- and Explorer
+        # cannot parse a quoted /select, so it gives up and opens Documents.
+        # The quotes have to sit around the path alone. Only paths with a space
+        # were ever affected, which is why this looked intermittent.
+        #
         # /select opens the folder with the file highlighted, which beats
         # opening the folder and leaving them to find it.
-        argument = f"/select,{target}" if target.exists() else str(target.parent)
-        subprocess.Popen(["explorer", argument])
+        if target.exists() and not target.is_dir():
+            command = f'explorer /select,"{target}"'
+        else:
+            folder = target if target.is_dir() else target.parent
+            command = f'explorer "{folder}"'
+        subprocess.Popen(command)
         return True
 
     opener = "open" if sys.platform == "darwin" else "xdg-open"
