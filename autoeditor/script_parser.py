@@ -2,13 +2,18 @@
 
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from .timecode import format_timecode, parse_timecode
 from .timeline import (
     VIDEO_EXTENSIONS,
+    BalanceSettings,
     Defaults,
+    GlobalEdits,
     Join,
     OutputSettings,
+    Region,
     SilenceSettings,
     TimelineClip,
     VideoScript,
@@ -35,6 +40,15 @@ _SECTION_ALIASES = {
     "settings": "output",
     "defaults": "defaults",
     "default": "defaults",
+    "joins": "defaults",
+    "join": "defaults",
+    "global edits": "globals",
+    "global": "globals",
+    "globals": "globals",
+    "master": "globals",
+    "auto editor": "autoedit",
+    "auto edit": "autoedit",
+    "passes": "autoedit",
     "silence": "silence",
     "trim silence": "silence",
     "dead space": "silence",
@@ -97,7 +111,9 @@ def _parse_bool(value: str, key: str, line: int) -> bool:
 
 def _parse_number(value: str, key: str, line: int) -> float:
     """Parse a duration or level, ignoring a trailing unit (`0.5s`, `-30 dB`)."""
-    cleaned = re.sub(r"(?i)\s*(seconds|second|secs|sec|s|db)\s*$", "", value.strip())
+    cleaned = re.sub(
+        r"(?i)\s*(seconds|second|secs|sec|lufs|lu|dbtp|db|s)\s*$", "", value.strip()
+    )
     try:
         return float(cleaned)
     except ValueError:
@@ -119,7 +135,7 @@ def _resolve_path(raw: str, base: Path) -> Path:
 _WINDOWS_RESERVED = '<>:"|?*'
 
 
-def _check_writable_name(path: Path, line: int) -> None:
+def check_output_path(path: Path, line: int | None = None) -> None:
     """Reject an output path Windows would silently write as a data stream."""
     if os.name != "nt":
         return
@@ -134,12 +150,14 @@ def _check_writable_name(path: Path, line: int) -> None:
             )
 
 
-def _expand_source(path: Path, line: int) -> list[Path]:
+def _expand_source(path: Path, line: int, strict: bool = True) -> list[Path]:
     """Expand a directory or glob into its video files, oldest first."""
     if any(ch in path.name for ch in "*?[") and not path.exists():
         matches = [p for p in path.parent.glob(path.name) if p.is_file()]
         if not matches:
-            raise ScriptError(f"no files match {path}", line)
+            if strict:
+                raise ScriptError(f"no files match {path}", line)
+            return [path]
         return sorted(matches, key=lambda p: (p.stat().st_mtime, p.name))
 
     if path.is_dir():
@@ -148,11 +166,14 @@ def _expand_source(path: Path, line: int) -> list[Path]:
             if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
         ]
         if not videos:
-            raise ScriptError(f"no video files in folder {path}", line)
+            if strict:
+                raise ScriptError(f"no video files in folder {path}", line)
+            return [path]
         return sorted(videos, key=lambda f: (f.stat().st_mtime, f.name))
 
     if not path.exists():
-        raise ScriptError(f"file not found: {path}", line)
+        if strict:
+            raise ScriptError(f"file not found: {path}", line)
     return [path]
 
 
@@ -165,15 +186,90 @@ _JOIN_WORDS = {
 }
 
 _JOIN_OPTION_RE = re.compile(r"^(hard cut|cut|crossfade|dissolve|fade)\s*(.*)$")
+# `volume +3 dB`, `gain -2`, `audio 1.5` -- a straight level trim for one clip.
+_GAIN_OPTION_RE = re.compile(r"^(volume|gain|audio)\s+([+-]?[\d.]+\s*(?:db)?)$")
+# `balance +8.2 dB` -- what levelling measured, written back so a render need
+# not measure it again.
+_BALANCE_OPTION_RE = re.compile(r"^balance\s+([+-]?[\d.]+\s*(?:db)?)$")
+# `audio overlap 2`, `audio lead -1.5` -- where this join's sound sits.
+_AUDIO_EDIT_RE = re.compile(
+    r"^audio\s+(overlap|blend|crossfade|lead|offset)\s+"
+    r"([+-]?[\d.]+\s*(?:s|sec|secs|seconds)?|auto|follow)$"
+)
+_AUDIO_EDIT_KEYS = {
+    "overlap": "audio_overlap", "blend": "audio_overlap", "crossfade": "audio_overlap",
+    "lead": "audio_lead", "offset": "audio_lead",
+}
+_REGION_RE = re.compile(r"^([\d:.]+)\s*(?:-|to|–|—)\s*([\d:.]+)$")
 
 
-def _parse_options(text: str, line: int) -> tuple[Join | None, float | None, bool | None]:
-    """Parse the comma-separated options after a timeline item's separator."""
+@dataclass
+class ItemOptions:
     join: Join | None = None
     duration: float | None = None
     trim: bool | None = None
+    gain_db: float | None = None
+    audio_overlap: float | None = None
+    audio_lead: float | None = None
+    balance_db: float | None = None
+    # `audio overlap auto` asks for None, which a plain None cannot express.
+    audio_overlap_auto: bool = False
+    regions: list[Region] = field(default_factory=list)
+
+
+def _parse_options(text: str, line: int) -> ItemOptions:
+    """Parse the comma-separated options after a timeline item's separator.
+
+    A join written before any range is the clip's join to the previous clip.
+    A join written after one applies to the range that follows it, so regions
+    of a single clip can blend into each other.
+    """
+    opts = ItemOptions()
+    pending: tuple[Join, float | None] | None = None
 
     for raw_option in text.split(","):
+        # Ranges are matched before normalising, which would eat their dash.
+        region = _REGION_RE.match(raw_option.strip())
+        if region:
+            try:
+                start = parse_timecode(region.group(1))
+                end = parse_timecode(region.group(2))
+            except ValueError as exc:
+                raise ScriptError(f"{exc} in {raw_option.strip()!r}", line) from None
+            if end <= start:
+                raise ScriptError(
+                    f"region {raw_option.strip()!r} ends before it starts", line
+                )
+            entry = Region(start, end)
+            if pending and opts.regions:
+                entry.join, duration = pending[0], pending[1]
+                entry.join_duration = duration if duration is not None else -1.0
+            pending = None
+            opts.regions.append(entry)
+            continue
+
+        # Matched raw too: _norm_key turns a minus sign into a space.
+        edit_option = _AUDIO_EDIT_RE.match(raw_option.strip().lower())
+        if edit_option:
+            field, value = _AUDIO_EDIT_KEYS[edit_option.group(1)], edit_option.group(2)
+            if value in ("auto", "follow"):
+                if field == "audio_lead":
+                    raise ScriptError("audio lead needs a number of seconds", line)
+                opts.audio_overlap_auto = True
+            else:
+                setattr(opts, field, _parse_number(value, edit_option.group(1), line))
+            continue
+
+        levelled = _BALANCE_OPTION_RE.match(raw_option.strip().lower())
+        if levelled:
+            opts.balance_db = _parse_number(levelled.group(1), "balance", line)
+            continue
+
+        gain = _GAIN_OPTION_RE.match(raw_option.strip().lower())
+        if gain:
+            opts.gain_db = _parse_number(gain.group(2), gain.group(1), line)
+            continue
+
         option = _norm_key(raw_option)
         if not option:
             continue
@@ -181,23 +277,53 @@ def _parse_options(text: str, line: int) -> tuple[Join | None, float | None, boo
         match = _JOIN_OPTION_RE.match(option)
         if match:
             name, rest = match.group(1), match.group(2).strip()
-            join = _JOIN_WORDS[name]
-            if rest:
-                duration = _parse_number(rest, name, line)
+            duration = _parse_number(rest, name, line) if rest else None
+            if opts.regions:
+                pending = (_JOIN_WORDS[name], duration)
+            else:
+                opts.join = _JOIN_WORDS[name]
+                opts.duration = duration
             continue
 
         if option in ("trim silence", "trim", "remove silence", "remove dead space"):
-            trim = True
+            opts.trim = True
         elif option in ("keep silence", "no trim", "no trim silence"):
-            trim = False
+            opts.trim = False
         else:
             raise ScriptError(
                 f"unknown timeline option {raw_option.strip()!r}. Valid: cut, "
-                "crossfade [seconds], fade [seconds], trim silence, keep silence",
+                "crossfade [seconds], fade [seconds], trim silence, keep silence, "
+                "volume [dB], balance [dB], audio overlap [seconds], "
+                "audio lead [seconds], "
+                "or a range like 2:10-5:30",
                 line,
             )
 
-    return join, duration, trim
+    return opts
+
+
+def _resolve_regions(
+    regions: list[Region], defaults: Defaults, line: int
+) -> list[Region] | None:
+    """Sort regions, fill in default join durations, and reject overlaps."""
+    if not regions:
+        return None
+
+    ordered = sorted(regions, key=lambda r: r.start)
+    for i, region in enumerate(ordered):
+        if region.join_duration < 0:
+            region.join_duration = _default_duration(region.join, defaults)
+        if region.join is not Join.CUT and region.join_duration <= 0:
+            region.join, region.join_duration = Join.CUT, 0.0
+        if i and region.start < ordered[i - 1].end - 1e-6:
+            raise ScriptError(
+                f"regions {format_timecode(ordered[i - 1].start)}-"
+                f"{format_timecode(ordered[i - 1].end)} and "
+                f"{format_timecode(region.start)}-{format_timecode(region.end)} overlap",
+                line,
+            )
+    ordered[0].join, ordered[0].join_duration = Join.CUT, 0.0
+    return ordered
 
 
 def _default_duration(join: Join, defaults: Defaults) -> float:
@@ -213,9 +339,28 @@ _OUTPUT_KEYS = {
     "resolution": "resolution", "size": "resolution",
     "fps": "fps", "frame rate": "fps", "framerate": "fps",
     "encoder": "encoder", "video encoder": "encoder", "codec": "encoder",
+    "quality": "quality", "crf": "quality", "cq": "quality",
+    # Global edits, historically written here; they now live in their own
+    # section and are routed there, so old scripts keep working.
     "fade in": "fade_in",
     "fade out": "fade_out",
+    "audio adjust": "audio_gain_db",
     "dry run": "dry_run",
+}
+
+_GLOBAL_FROM_OUTPUT = {"fade_in", "fade_out", "audio_gain_db"}
+
+_GLOBAL_KEYS = {
+    "fade in": "fade_in",
+    "fade out": "fade_out",
+    "audio adjust": "audio_gain_db", "audio gain": "audio_gain_db",
+    "volume": "audio_gain_db", "gain": "audio_gain_db",
+}
+
+_AUTOEDIT_KEYS = {
+    "balance audio": "enabled", "balance": "enabled", "balance levels": "enabled",
+    "audio target": "target_lufs", "target": "target_lufs",
+    "target loudness": "target_lufs", "loudness": "target_lufs",
 }
 
 _SILENCE_KEYS = {
@@ -230,18 +375,23 @@ _DEFAULT_KEYS = {
     "crossfade": "crossfade",
     "fade": "fade",
     "trim silence": "trim_silence", "trim": "trim_silence",
+    "audio overlap": "audio_overlap", "audio blend": "audio_overlap",
+    "audio crossfade": "audio_overlap",
+    "audio lead": "audio_lead", "audio offset": "audio_lead",
 }
 
 
-def _apply_output(raw: dict[str, tuple[str, int]], base: Path) -> OutputSettings:
+def _apply_output(raw: dict[str, tuple[str, int]], base: Path, strict: bool = True) -> OutputSettings:
     if "file" not in raw:
         raise ScriptError("the Output section must set `file:` (the .mp4 to write)")
 
     out = OutputSettings(file=_resolve_path(raw["file"][0], base))
-    _check_writable_name(out.file, raw["file"][1])
+    # Loose parsing lets the UI load and fix a bad name; rendering re-checks.
+    if strict:
+        check_output_path(out.file, raw["file"][1])
 
     for field_name, (value, line) in raw.items():
-        if field_name == "file":
+        if field_name in _GLOBAL_FROM_OUTPUT or field_name == "file":
             continue
         if field_name == "resolution":
             if not _RESOLUTION_RE.match(value):
@@ -251,12 +401,31 @@ def _apply_output(raw: dict[str, tuple[str, int]], base: Path) -> OutputSettings
             out.fps = int(_parse_number(value, "fps", line))
         elif field_name == "encoder":
             out.encoder = value
+        elif field_name == "quality":
+            out.quality = _parse_number(value, "quality", line)
         elif field_name == "dry_run":
             out.dry_run = _parse_bool(value, "dry run", line)
         else:
             setattr(out, field_name, _parse_number(value, field_name, line))
 
     return out
+
+
+def _apply_globals(raw: dict[str, tuple[str, int]]) -> GlobalEdits:
+    edits = GlobalEdits()
+    for field_name, (value, line) in raw.items():
+        setattr(edits, field_name, _parse_number(value, field_name, line))
+    return edits
+
+
+def _apply_autoedit(raw: dict[str, tuple[str, int]]) -> BalanceSettings:
+    settings = BalanceSettings()
+    for field_name, (value, line) in raw.items():
+        if field_name == "enabled":
+            settings.enabled = _parse_bool(value, "balance audio", line)
+        else:
+            settings.target_lufs = _parse_number(value, field_name, line)
+    return settings
 
 
 def _apply_silence(raw: dict[str, tuple[str, int]]) -> SilenceSettings:
@@ -283,8 +452,8 @@ def _apply_defaults(raw: dict[str, tuple[str, int]]) -> Defaults:
     return defaults
 
 
-def parse_script(path: Path) -> VideoScript:
-    """Parse a markdown video script into a `VideoScript`."""
+def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
+    """Parse a markdown video script; strict=False keeps missing files as placeholders."""
     if not path.exists():
         raise ScriptError(f"script file not found: {path}")
 
@@ -297,6 +466,8 @@ def parse_script(path: Path) -> VideoScript:
     warnings: list[str] = []
 
     raw_output: dict[str, tuple[str, int]] = {}
+    raw_globals: dict[str, tuple[str, int]] = {}
+    raw_autoedit: dict[str, tuple[str, int]] = {}
     raw_silence: dict[str, tuple[str, int]] = {}
     raw_defaults: dict[str, tuple[str, int]] = {}
     assets: dict[str, str] = {}
@@ -305,6 +476,8 @@ def parse_script(path: Path) -> VideoScript:
 
     section_tables = {
         "output": (_OUTPUT_KEYS, raw_output),
+        "globals": (_GLOBAL_KEYS, raw_globals),
+        "autoedit": (_AUTOEDIT_KEYS, raw_autoedit),
         "silence": (_SILENCE_KEYS, raw_silence),
         "defaults": (_DEFAULT_KEYS, raw_defaults),
     }
@@ -355,10 +528,17 @@ def parse_script(path: Path) -> VideoScript:
     if not saw_timeline:
         raise ScriptError("no `## Timeline` section found -- nothing to render")
 
-    output = _apply_output(raw_output, base)
+    output = _apply_output(raw_output, base, strict)
+    # An explicit Global Edits section wins over the same key left in Output.
+    inherited = {
+        k: v for k, v in raw_output.items()
+        if k in _GLOBAL_FROM_OUTPUT and k not in raw_globals
+    }
+    edits = _apply_globals({**inherited, **raw_globals})
     silence = _apply_silence(raw_silence)
+    balance = _apply_autoedit(raw_autoedit)
     defaults = _apply_defaults(raw_defaults)
-    clips = _build_clips(timeline, assets, defaults, base)
+    clips = _build_clips(timeline, assets, defaults, base, strict)
 
     if not clips:
         raise ScriptError("the Timeline section is empty -- nothing to render")
@@ -372,6 +552,8 @@ def parse_script(path: Path) -> VideoScript:
         output=output,
         silence=silence,
         defaults=defaults,
+        globals=edits,
+        balance=balance,
         clips=clips,
     )
 
@@ -381,6 +563,7 @@ def _build_clips(
     assets: dict[str, str],
     defaults: Defaults,
     base: Path,
+    strict: bool = True,
 ) -> list[TimelineClip]:
     """Resolve raw timeline lines into clips, expanding folders and globs."""
     clips: list[TimelineClip] = []
@@ -390,20 +573,33 @@ def _build_clips(
         if not source:
             raise ScriptError(f"timeline item has no file or asset name: {content!r}", lineno)
 
-        join, duration, trim = _parse_options(option_text, lineno)
-        join = join if join is not None else defaults.join
-        duration = duration if duration is not None else _default_duration(join, defaults)
-        trim = trim if trim is not None else defaults.trim_silence
+        opts = _parse_options(option_text, lineno)
+        join = opts.join if opts.join is not None else defaults.join
+        duration = opts.duration if opts.duration is not None else _default_duration(join, defaults)
+        trim = opts.trim if opts.trim is not None else defaults.trim_silence
+        gain = opts.gain_db if opts.gain_db is not None else 0.0
+
+        # None means "sound follows picture"; an explicit `auto` asks for that
+        # back when the project as a whole has been given an overlap.
+        if opts.audio_overlap_auto:
+            overlap = None
+        elif opts.audio_overlap is not None:
+            overlap = opts.audio_overlap
+        else:
+            overlap = defaults.audio_overlap
+        lead = opts.audio_lead if opts.audio_lead is not None else defaults.audio_lead
 
         # A zero-length blend is a cut; collapse it so the graph has no degenerate filters.
         if join is not Join.CUT and duration <= 0:
             join, duration = Join.CUT, 0.0
 
+        regions = _resolve_regions(opts.regions, defaults, lineno)
+
         alias = _norm_key(source)
         is_alias = alias in assets
         raw_path = assets[alias] if is_alias else source
 
-        for resolved in _expand_source(_resolve_path(raw_path, base), lineno):
+        for resolved in _expand_source(_resolve_path(raw_path, base), lineno, strict):
             clips.append(
                 TimelineClip(
                     path=resolved,
@@ -411,7 +607,13 @@ def _build_clips(
                     join=join,
                     join_duration=duration,
                     trim_silence=trim,
+                    audio_gain_db=gain,
+                    balance_db=opts.balance_db,
+                    audio_overlap=overlap,
+                    audio_lead=lead,
                     line=lineno,
+                    regions=regions,
+                    missing=not resolved.is_file(),
                 )
             )
 

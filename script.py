@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from autoeditor.ffmpeg_ops import format_time, probe_script, render_script
+from autoeditor.ffmpeg_ops import audio_notes, format_time, probe_script, render_script
 from autoeditor.script_parser import ScriptError, parse_script
 
 USAGE = "usage: python script.py <script.md>"
@@ -49,6 +49,8 @@ def main(argv: list[str]) -> int:
     print("\n  Probing clips...")
     infos = probe_script(script)
     print(f"  Source material: {format_time(sum(i.effective_duration for i in infos))}")
+    for note in audio_notes(script, infos):
+        print(f"  warning: {note}")
 
     try:
         output = render_script(script, infos)

@@ -1,0 +1,12 @@
+{
+  "name": "autoeditor",
+  "version": "1.0.0",
+  "description": "FullControl MTG Auto Editor - desktop shell around the Python engine",
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "node desktop/launch.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

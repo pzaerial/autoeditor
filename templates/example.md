@@ -8,9 +8,13 @@ Another classic Daily Dub by pZ_aeriaL and the boys.
 - resolution: 1920x1080
 - fps: 60
 - encoder: libx264
+- dry run: no
+
+## Global Edits
+
 - fade in: 0.5
 - fade out: 0.5
-- dry run: no
+- audio adjust: 0 dB
 
 ## Defaults
 

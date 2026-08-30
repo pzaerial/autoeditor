@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auto Editor</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">Auto Editor</div>
+  <nav class="steps">
+    <button class="step" data-page="settings"><span>1</span> Project Settings</button>
+    <button class="step" data-page="clips"><span>2</span> Clips</button>
+    <button class="step" data-page="edit"><span>3</span> Edit</button>
+    <button class="step" data-page="render"><span>4</span> Render</button>
+  </nav>
+  <div class="topbar-right">
+    <span id="project-title" class="project-title"></span>
+  </div>
+</header>
+
+<main>
+
+<!-- ======================= PROJECT SETTINGS ======================= -->
+<section class="page" id="page-settings">
+  <div class="settings-grid">
+
+    <div class="col">
+      <h2>Template</h2>
+      <div class="row">
+        <select id="template-select"><option value="">Blank project</option></select>
+        <button id="load-template" class="primary">Load</button>
+      </div>
+      <div class="row tight">
+        <input type="text" id="template-name" placeholder="my-episode">
+        <button id="save-template">Save as</button>
+      </div>
+      <div id="template-note" class="note"></div>
+    </div>
+
+    <div class="col">
+      <h2>Output</h2>
+      <label>File
+        <input type="text" id="out-file" placeholder="C:\Users\you\Videos\out\episode.mp4">
+      </label>
+      <div id="out-check" class="note"></div>
+      <div class="grid-2">
+        <label>Resolution <input type="text" id="out-resolution" value="1920x1080"></label>
+        <label>FPS <input type="number" id="out-fps" value="60" min="1"></label>
+        <label>Encoder <select id="out-encoder"></select></label>
+        <label>Quality <input type="number" id="out-quality" step="1" min="0" max="51" placeholder="default"></label>
+      </div>
+      <div id="encoder-note" class="note"></div>
+    </div>
+
+    <div class="col">
+      <h2>Global Edits</h2>
+      <div class="grid-2">
+        <label>Fade in (s) <input type="number" id="glob-fade-in" value="0.5" step="0.1" min="0"></label>
+        <label>Fade out (s) <input type="number" id="glob-fade-out" value="0.5" step="0.1" min="0"></label>
+        <label>Audio adjust (dB) <input type="number" id="glob-audio-gain" value="0" step="0.5"></label>
+      </div>
+    </div>
+
+    <div class="col">
+      <h2>Joins</h2>
+      <div class="grid-2">
+        <label>Default join
+          <select id="def-join">
+            <option value="crossfade">crossfade</option>
+            <option value="cut">cut</option>
+            <option value="fade">fade</option>
+          </select>
+        </label>
+        <label>Crossfade (s) <input type="number" id="def-crossfade" value="0.3" step="0.1" min="0"></label>
+        <label>Fade (s) <input type="number" id="def-fade" value="0.5" step="0.1" min="0"></label>
+        <label>Audio overlap (s)
+          <input type="number" id="def-audio-overlap" step="0.1" min="0" placeholder="follow picture">
+        </label>
+        <label>Audio lead (s) <input type="number" id="def-audio-lead" value="0" step="0.1"></label>
+      </div>
+    </div>
+
+    <details class="col panel" id="panel-autoeditor">
+      <summary>
+        <h2>Auto-Editor</h2>
+        <span class="panel-state" id="autoeditor-state">off</span>
+      </summary>
+
+      <label class="check"><input type="checkbox" id="bal-enabled"> Balance clip levels</label>
+      <div class="grid-2">
+        <label>Target (LUFS) <input type="number" id="bal-target" step="1" value="-14"></label>
+        <label>&nbsp;
+          <div class="row tight">
+            <button id="balance-run">Re-measure</button>
+            <button id="balance-reset" class="ghost">Clear</button>
+          </div>
+        </label>
+      </div>
+      <div class="progress-wrap hidden" id="balance-progress">
+        <div class="progress"><div id="balance-bar"></div></div>
+        <div class="row tight">
+          <span id="balance-progress-text" class="hint mono"></span>
+          <span class="spacer"></span>
+          <button id="balance-cancel" class="ghost small">Cancel</button>
+        </div>
+      </div>
+      <div id="balance-note" class="note"></div>
+      <div id="balance-results" class="balance-results"></div>
+
+      <label class="check"><input type="checkbox" id="def-trim"> Trim silence</label>
+      <div class="grid-2">
+        <label>Threshold (dB) <input type="number" id="sil-threshold" value="-30" step="1"></label>
+        <label>Padding (s) <input type="number" id="sil-padding" value="0.5" step="0.1" min="0"></label>
+        <label>Min silence (s) <input type="number" id="sil-min-silence" value="1" step="0.1" min="0"></label>
+        <label>Min segment (s) <input type="number" id="sil-min-segment" value="0.5" step="0.1" min="0"></label>
+      </div>
+    </details>
+
+  </div>
+</section>
+
+<!-- ============================ CLIPS ============================ -->
+<section class="page" id="page-clips">
+  <div class="col">
+    <div class="row between tight">
+      <h2>Clips <span id="setup-count" class="badge">0</span></h2>
+      <div class="row tight">
+        <button id="open-picker">Add files&hellip;</button>
+        <button id="clips-to-edit" class="primary">Edit &rarr;</button>
+      </div>
+    </div>
+    <p class="hint">Drag a row to reorder. Click one to open it on the Edit page.</p>
+    <div id="clip-table" class="clip-table"></div>
+    <div class="rail-total" id="clips-total"></div>
+  </div>
+</section>
+
+<!-- ========================= FILE PICKER ========================= -->
+<div class="modal hidden" id="picker">
+  <div class="modal-box">
+    <div class="row between tight">
+      <h2 id="picker-title">Add files</h2>
+      <button id="close-picker" class="ghost icon">&times;</button>
+    </div>
+    <p class="hint hidden" id="picker-sub"></p>
+    <div class="row">
+      <input type="text" id="browse-path" placeholder="C:\Users\you\Videos\raw">
+      <button id="browse-go">Go</button>
+    </div>
+    <div id="browse-crumbs" class="crumbs"></div>
+    <div id="browse-list" class="browser"></div>
+    <label class="check hidden" id="relink-rest">
+      <input type="checkbox" id="relink-rest-box">
+      <span id="relink-rest-text"></span>
+    </label>
+    <div class="row between">
+      <span id="picker-count" class="hint">Nothing selected</span>
+      <button id="add-selected" class="primary">Add selected</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ EDIT ============================ -->
+<section class="page" id="page-edit">
+  <div class="edit-layout">
+
+    <aside class="clip-rail">
+      <h2>Order <span class="hint-inline">drag to reorder</span></h2>
+      <ol id="clip-list" class="clip-list"></ol>
+      <div class="rail-total" id="rail-total"></div>
+    </aside>
+
+    <div class="stage">
+      <div id="no-clip" class="empty">Select a clip to preview and trim.</div>
+
+      <div id="clip-editor" class="hidden">
+        <div class="stage-head">
+          <div>
+            <h2 id="clip-name"></h2>
+            <div id="clip-meta" class="hint"></div>
+          </div>
+          <div class="join-controls">
+            <label>Joins from previous
+              <select id="clip-join">
+                <option value="crossfade">crossfade</option>
+                <option value="cut">cut</option>
+                <option value="fade">fade</option>
+              </select>
+            </label>
+            <label>Seconds
+              <input type="number" id="clip-join-duration" step="0.1" min="0">
+            </label>
+            <label class="check"><input type="checkbox" id="clip-trim"> Trim silence</label>
+            <button id="clip-remove" class="ghost danger">Remove clip</button>
+          </div>
+        </div>
+
+        <div class="video-wrap">
+          <video id="preview" preload="metadata"></video>
+          <div id="video-fallback" class="fallback hidden"></div>
+        </div>
+
+        <div class="audio-bar">
+          <span class="audio-label">Audio</span>
+          <label class="check"><input type="checkbox" id="clip-mute"> Mute preview</label>
+          <span class="spacer"></span>
+          <label class="inline">Clip volume (dB)
+            <input type="number" id="clip-gain" step="0.5" value="0">
+          </label>
+          <input type="range" id="clip-gain-slider" min="-24" max="24" step="0.5" value="0">
+          <span id="clip-gain-total" class="hint mono"></span>
+        </div>
+
+        <div class="audio-bar" id="join-audio-bar">
+          <span class="audio-label">Join audio</span>
+          <label class="inline">Overlap (s)
+            <input type="number" id="clip-audio-overlap" step="0.1" min="0" placeholder="follow">
+          </label>
+          <label class="inline">Lead (s)
+            <input type="number" id="clip-audio-lead" step="0.1" value="0">
+          </label>
+          <span id="clip-audio-note" class="hint"></span>
+        </div>
+
+        <div class="transport">
+          <button id="play-toggle">Play</button>
+          <span id="time-readout" class="mono">0:00 / 0:00</span>
+          <span class="spacer"></span>
+          <button id="mark-region">New region</button>
+          <button id="mark-in">Start [</button>
+          <button id="mark-out">End ]</button>
+        </div>
+
+        <div class="scrubber" id="scrubber">
+          <div class="filmstrip" id="filmstrip"></div>
+          <div class="regions" id="region-layer"></div>
+          <div class="playhead" id="playhead"></div>
+        </div>
+        <div class="ruler" id="ruler"></div>
+
+        <div class="zoom-bar">
+          <div class="overview" id="overview" title="Drag to pan, drag an edge to zoom">
+            <div class="overview-regions" id="overview-regions"></div>
+            <div class="overview-window" id="overview-window">
+              <div class="ov-handle left"></div>
+              <div class="ov-handle right"></div>
+            </div>
+            <div class="overview-playhead" id="overview-playhead"></div>
+          </div>
+          <div class="zoom-controls">
+            <button id="zoom-out" class="ghost icon" title="Zoom out">&minus;</button>
+            <input type="range" id="zoom-slider" min="0" max="100" value="0"
+                   title="Zoom — drag, or roll the wheel over the timeline">
+            <button id="zoom-in" class="ghost icon" title="Zoom in">+</button>
+            <button id="zoom-reset" class="ghost">Fit</button>
+            <span id="zoom-readout" class="hint mono"></span>
+          </div>
+        </div>
+
+        <div class="mark-hint" id="mark-hint"></div>
+
+        <div class="region-table">
+          <div class="row between">
+            <h3>Regions kept <span id="region-count" class="badge">0</span></h3>
+            <button id="clear-regions" class="ghost">Use whole clip</button>
+          </div>
+          <div id="region-rows"></div>
+          <p class="hint" id="region-hint"></p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================ RENDER ============================ -->
+<section class="page" id="page-render">
+  <div class="render-layout">
+    <div>
+      <h2>Summary</h2>
+      <table class="summary" id="render-summary"></table>
+
+      <h2>Timeline</h2>
+      <div id="render-timeline" class="mini-timeline"></div>
+    </div>
+
+    <div>
+      <h2>Output</h2>
+      <label>File <input type="text" id="render-out-file"></label>
+      <div id="render-out-check" class="note"></div>
+
+      <div class="row">
+        <button id="btn-render" class="primary big">Render</button>
+        <button id="btn-cancel" class="ghost" disabled>Cancel</button>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress"><div id="progress-bar"></div></div>
+        <div id="progress-text" class="mono hint">Idle</div>
+      </div>
+
+      <h2>Pipeline</h2>
+      <ol id="stage-list" class="pipeline"></ol>
+
+      <h2>Utilisation <span id="util-now" class="hint-inline"></span></h2>
+      <canvas id="util-graph" class="util" width="720" height="90"></canvas>
+      <div id="util-note" class="hint"></div>
+
+      <h2>Log</h2>
+      <div class="row tight log-tools">
+        <label class="check"><input type="checkbox" id="log-ffmpeg" checked> Show ffmpeg output</label>
+        <span class="spacer"></span>
+        <span id="log-count" class="hint"></span>
+      </div>
+      <pre id="render-log" class="log"></pre>
+
+      <div class="row" id="done-actions" style="display:none">
+        <button id="btn-reveal">Open output folder</button>
+      </div>
+
+      <h2>Export</h2>
+      <p class="hint">Write this project as a markdown script. <code>python script.py &lt;file&gt;</code> renders it identically.</p>
+      <div class="row">
+        <input type="text" id="export-path" placeholder="templates\my-episode.md">
+        <button id="btn-export">Export .md</button>
+      </div>
+      <div id="export-note" class="note"></div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

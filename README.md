@@ -1,27 +1,34 @@
 # FullControl MTG – Auto Editor
 Markdown driven video autoeditor written in Python.
-
 ```
 python script.py myvideo.md
 ```
-
 Control your video format by writing a markdown file.
 
-## Quick start
+Or use the desktop app, which does the same thing with a preview and a timeline:
+```
+npm install      (once)
+npm start
+```
+Both drive the same engine — the app exports its project as a markdown script, and
+`python script.py` renders that export identically. Full guide: [.claude/ui.md](.claude/ui.md).
 
+## Requirements
+- Python 3.10+ (no third-party packages)
+- [ffmpeg](https://ffmpeg.org/download.html) and `ffprobe` on your `PATH`
+- Node 18+ **only** for the desktop app; the CLI and the browser UI need neither
+
+## Quick Start
 Copy a script out of [templates/](templates/), point the paths at your own files, and run it:
-
 ```
 python script.py templates\example.md
 ```
+Set `dry run: yes` in the `## Output` section to print the resolved timeline without rendering.
 
-Set `dry run: yes` in the `## Output` section to print the resolved timeline without rendering — a fast way to check every path and join before committing to an encode.
 
----
+## Tempates
 
-## The script format
-
-A script is ordinary markdown. `##` headings open sections, and the list items inside them carry the settings. Anything that isn't a heading or a list item — paragraphs, blockquotes, fenced code — is ignored, so a script doubles as your notes for the episode.
+Templates are written in markdown. Example:
 
 ```markdown
 # 2026.03.13 Jeskai Control
@@ -53,102 +60,242 @@ Full reference: [.claude/script-format.md](.claude/script-format.md).
 
 ### Sections
 
-| Section | Purpose |
+| Section | Holds |
 |---|---|
-| `# Title` | The episode name. Cosmetic — printed when rendering. |
-| `## Output` | Where the finished file goes and what format it is. |
-| `## Defaults` | Fallbacks for timeline items that don't state their own. |
-| `## Silence` | Tuning for dead-space removal. |
-| `## Assets` | Named shortcuts for clips you reuse (`intro`, `ad 1`, …). |
-| `## Timeline` | The running order. This is the edit. |
+| `# Title` | episode name; cosmetic |
+| `## Output` | destination file and format |
+| `## Global Edits` | edits over the whole video, or every clip alike |
+| `## Defaults` | fallbacks for timeline items |
+| `## Silence` | dead-space detection tuning |
+| `## Assets` | named shortcuts for reused clips |
+| `## Timeline` | the running order — required |
+
+Keys are case- and punctuation-insensitive: `Fade In` = `fade_in` = `fade-in`.
 
 ### Output
 
-| Key | Default | Description |
+| Key | Default | Value |
 |---|---|---|
-| `file` | *required* | The `.mp4` to write. Parent folders are created for you. |
-| `resolution` | `1920x1080` | Output size as `WxH`. Sources are letterboxed to fit. |
-| `fps` | `60` | Output frame rate. |
-| `encoder` | `libx264` | `libx264` (CPU), `h264_nvenc` (NVIDIA), `h264_amf` (AMD), `h264_qsv` (Intel). |
-| `fade in` | `0.5` | Fade up from black at the very start, in seconds. |
-| `fade out` | `0.5` | Fade to black at the very end, in seconds. |
-| `dry run` | `no` | `yes` prints the resolved timeline and stops. |
+| `file` | *required* | `.mp4` to write; parent folders created |
+| `resolution` | `1920x1080` | `WxH`; sources letterboxed to fit |
+| `fps` | `60` | output frame rate |
+| `encoder` | `libx264` | see encoders below |
+| `quality` | per encoder | lower = bigger and better (CRF-like everywhere) |
+| `dry run` | `no` | `yes` = print timeline, don't render |
+
+| Encoder | Hardware |
+|---|---|
+| `libx264`, `libx265` | CPU |
+| `h264_nvenc`, `hevc_nvenc` | NVIDIA |
+| `h264_amf` | AMD |
+| `h264_qsv` | Intel Quick Sync |
+
+Audio is always AAC 192k, 48 kHz, stereo.
+
+**Rendering on the GPU:** set `encoder` to `h264_nvenc` (NVIDIA), `h264_amf` (AMD) or
+`h264_qsv` (Intel). Measured on a three-clip 1080p60 edit: `libx264` 12.4s, `h264_nvenc`
+5.5s — about twice as fast. The app greys out hardware encoders this machine cannot use.
+
+High CPU with an apparently idle GPU is expected, and mostly a measurement artefact.
+NVENC is fixed-function silicon separate from the shaders, so `utilization.gpu` stays in
+the low teens while the encoder engine runs at 100% — the render page graphs both, and the
+encoder trace is the one that matters. The CPU stays busy for a real reason: decoding every
+input and running the transitions is CPU work whatever encodes the result, and that stage
+alone was 3.9s of those 5.5s.
+
+### Global Edits
+
+Aliases: `## Global`, `## Globals`, `## Master`.
+
+| Key | Default | Value |
+|---|---|---|
+| `fade in` | `0.5` | seconds, up from black at the very start |
+| `fade out` | `0.5` | seconds, to black at the very end |
+| `audio adjust` | `0` | dB added to every clip, on top of its own `volume` |
+
+These three used to live under `## Output` and are still read there, so older
+scripts keep working; the app writes them here.
 
 ### Defaults
 
-| Key | Default | Description |
+| Key | Default | Value |
 |---|---|---|
-| `join` | `crossfade` | How clips attach when the timeline item doesn't say. |
-| `crossfade` | `0.3` | Default crossfade length in seconds. |
-| `fade` | `0.5` | Default fade-through-black length in seconds. |
-| `trim silence` | `no` | Whether clips get dead-space removal by default. |
+| `join` | `crossfade` | `cut`, `crossfade` or `fade` |
+| `crossfade` | `0.3` | seconds |
+| `fade` | `0.5` | seconds |
+| `trim silence` | `no` | `yes` / `no` |
+| `audio overlap` | *follow picture* | seconds; default length of a join's audio transition |
+| `audio lead` | `0` | seconds the audio transition runs ahead of the picture cut |
 
 ### Silence
 
-Dead-space removal is per clip and relative to that clip's own peak loudness, so it adapts to different mic gain between sessions.
+Per clip, relative to that clip's own peak.
 
-| Key | Default | Description |
+| Key | Default | Value |
 |---|---|---|
-| `threshold` | `-30 dB` | Silence floor **below the clip's peak**. More negative = less aggressive. |
-| `padding` | `0.5` | Seconds kept around each loud region. Gaps shorter than `2×` this merge. |
-| `min silence` | `1.0` | A silence must run this long before it's eligible to be cut. |
-| `min segment` | `0.5` | Kept regions shorter than this are dropped. |
+| `threshold` | `-30 dB` | floor below peak; more negative = less aggressive |
+| `padding` | `0.5` | seconds kept around each loud region; gaps under `2×` merge |
+| `min silence` | `1.0` | seconds before a silence can be cut |
+| `min segment` | `0.5` | seconds; shorter keeps are dropped |
+
+Trailing units optional: `-30 dB`, `0.5s`.
 
 ### Timeline
 
-Each item is a file, folder, glob or asset name, optionally followed by `--` and a comma-separated list of options:
+```
+<source> -- <option>, <option>, ...
+```
+
+`<source>` = file, folder, glob or asset name. Separator: `--`, `—`, or `|`.
+Options apply to the join with the **previous** item; the first item's join is ignored.
+
+| Option | Effect |
+|---|---|
+| `cut` | hard cut |
+| `crossfade [s]` | blend with previous |
+| `fade [s]` | previous to black, this up from black |
+| `trim silence` | remove dead air |
+| `keep silence` | override a `trim silence` default |
+| `volume [dB]` | level trim for this clip; `gain` and `audio` are aliases |
+| `audio overlap [s]` | length of this join's audio transition; `auto` follows the picture |
+| `audio lead [s]` | seconds the audio transition happens before the picture cut |
+| `2:10-5:30` | keep only this range; repeat for more |
+
+A join written **after** a range applies to the range that follows it, so sections of one
+clip can blend into each other:
+
+```markdown
+6. `C:\Footage\stream.mp4` -- fade, 2:10-5:30, crossfade 0.5, 41:00-52:20
+```
+
+`fade` = how the clip joins the previous clip. `crossfade 0.5` = how the second range joins
+the first. Ranges must not overlap.
 
 ```markdown
 1. `intro`
 2. `C:\Footage\ep12\game-1.mp4` -- crossfade 0.5, trim silence
 3. `C:\Assets\ad.mp4` -- fade
+4. `C:\Footage\stream.mp4` -- 2:10-5:30, 41:00-52:20, trim silence
 ```
 
-| Option | Meaning |
-|---|---|
-| `cut` | Hard cut from the previous clip. |
-| `crossfade [seconds]` | Blend with the previous clip. Uses the default length if unstated. |
-| `fade [seconds]` | Previous clip fades to black, this one fades up from it. |
-| `trim silence` | Remove dead air from this clip. |
-| `keep silence` | Leave this clip's dead air alone (overrides the default). |
+Ranges: `SS`, `MM:SS` or `HH:MM:SS`, decimals allowed. No range = whole clip.
+Clamped to real duration. End must follow start. Combine with `trim silence` = silence
+removed from within the kept ranges. Written by the app's Edit page.
+`crossfade 0` and `fade 0` = `cut`.
 
-Options describe how a clip attaches to the one **before** it, so they're read top-down like a cut list. The first item's join is ignored.
+### Sound across a join
 
-The separator can be `--`, an em dash, or `|`. Numbered and bulleted lists both work.
+`audio overlap` and `audio lead` let the sound change hands somewhere other than
+the picture cut — a music bed carried over a hard cut, a J-cut, an L-cut:
+
+```markdown
+4. `C:\Assets\outro.mp4` -- cut, audio overlap 3, audio lead 1
+```
+
+The overlap is played from the clips' own source either side of the cut, so the
+timeline never shifts and no gap appears. A clip used to its last frame has no
+spare audio to overlap with — trim its picture back to leave some, and the
+render will tell you how much it could actually use.
 
 ### Paths
 
-- Windows paths work as-is: `C:\Users\you\Videos\clip.mp4`.
-- **Spaces need no escaping or quoting** — `C:\My Clips\game 1.mp4` is fine, as are `#`, `&`, `'` and `!`.
-- Relative paths resolve against the folder holding the markdown file.
-- Backticks or quotes around a path are optional — use them if the path contains `--`.
-- `: < > " | ? *` are **not** valid in a Windows file or folder name. A `:` is the dangerous one: Windows silently writes an empty file plus a hidden data stream instead of failing, so the output path is checked up front and rejected with a suggested replacement.
-- Environment variables (`%USERPROFILE%`, `$HOME`) and `~` are expanded.
-- A **folder** expands to every video inside it, sorted by modification time then name.
-- A **glob** (`raw\ep12\game-*.mp4`) expands the same way.
+| Rule | |
+|---|---|
+| Windows paths | as-is: `C:\Users\you\Videos\clip.mp4` |
+| Spaces | no escaping or quoting; same for `#` `&` `'` `!` |
+| Relative | resolved against the `.md` file's folder |
+| Backticks / quotes | optional; needed only if the path contains `--` |
+| `: < > " \| ? *` | invalid in a Windows name; output path rejected up front |
+| `%VAR%`, `$VAR`, `~` | expanded |
+| Folder | expands to every video inside, by mtime then name |
+| Glob | `raw\ep12\game-*.mp4`, expands the same way |
 
-When a folder or glob expands to several clips, they all take the item's join and options — so `` `C:\raw\ep12` -- crossfade 0.3, trim silence `` crossfades the whole recording session together.
-
-Supported input formats: `.mp4`, `.mov`, `.mkv`, `.avi`, `.m4v`, `.webm`, `.wmv`, `.flv`.
+Expanded clips all take the item's join and options, including between themselves.
+Inputs: `.mp4` `.mov` `.mkv` `.avi` `.m4v` `.webm` `.wmv` `.flv`. Output: h264/aac `.mp4`.
 
 ---
 
 ## How it renders
 
-Everything happens in **one ffmpeg pass** with no intermediate files. Each clip is normalised (scaled and letterboxed to the target resolution, resampled to the target fps, audio to 48 kHz stereo), then:
+One ffmpeg pass, no intermediate files.
 
-- Runs of clips joined by `crossfade` are blended together with an `xfade`/`acrossfade` chain.
-- `cut` and `fade` joins break those runs apart and hard-cut between them; a `fade` join dips both sides to black first.
-- The assembled video gets its final fade-in and fade-out.
+1. Normalise each clip — scale + letterbox, target fps, `yuv420p`, audio 48 kHz stereo,
+   then its `volume` trim plus the project's `audio adjust` as one gain
+2. `trim silence` clips: `volumedetect` for peak, `silencedetect` relative to it, trimmed in-graph — analysed over **only the ranges the edit keeps**, which is both quicker and better targeted than measuring a whole stream you are cutting most of
+3. `crossfade` runs blended with `xfade` / `acrossfade`, each clip's audio
+   pinned to its own length so nothing drifts against the picture
+4. `cut` and `fade` joins hard-cut; `fade` dips both sides to black first
+5. Final fade in / out on the assembled output
 
-Clips marked `trim silence` are analysed first with two cheap audio-only passes (`volumedetect` for the peak, then `silencedetect` with a floor relative to it). The loud regions are padded, merged and trimmed in-graph, so no re-encode happens twice.
-
-Progress is reported live while ffmpeg runs.
+Progress is reported live.
 
 ---
 
 ## Notes
 
-- The same clip can appear in the timeline as many times as you like; silence analysis is cached per file.
-- A clip with no audio track gets a silent one synthesised so the concat stays in sync.
-- `crossfade 0` is treated as a `cut`.
+- A clip may appear any number of times; silence analysis is cached per file
+- Clips with no audio track get a silent one synthesised
+- `crossfade 0` = `cut`
+
+---
+
+## Preview
+
+The app previews clips in a browser window, which decodes less than ffmpeg does. `.avi`
+cannot be opened at all, and HEVC needs hardware decoding — Chromium has no software HEVC
+decoder, so an HEVC clip previews on a machine whose GPU handles it and not on one that
+doesn't. The app asks the window what it can decode rather than guessing, and says so
+plainly when it can't.
+
+Either way it only affects the preview. Regions can still be set from the filmstrip and the
+time fields, and **the render is unaffected** — ffmpeg decodes everything on the input list.
+
+## Levelling clips
+
+Tick **Balance clip levels** in Project Settings → Auto-Editor, or set it in a script:
+
+```markdown
+## Auto Editor
+
+- balance audio: yes
+- audio target: -14 LUFS
+```
+
+Every clip is measured and given the trim that lands it on the target — −14 LUFS by default,
+what YouTube normalises to. Switching it on levels what is already in the project and
+everything added afterwards, so the preview you trim against is already levelled; a render
+measures anything still unmeasured, so a hand-written script comes out level too.
+
+**Peaks are ignored on purpose.** The level comes from where a clip sits *most of the time*,
+not from its loudest moment — otherwise a single explosion in a two-hour recording decides
+the level of the whole thing. Loud peaks are fine: a limiter on the finished audio keeps
+them from clipping. The trim never exceeds ±24 dB and is kept separate from the manual
+`volume` setting, so the two never fight.
+
+## When footage moves
+
+A script keeps working when its paths do not: the app loads it anyway, flags the
+clips whose files are missing, and the **Relink** button on the Clips page points
+one at its new home. If the rest of the missing clips are in that same folder it
+offers to bring them along, so a moved drive is one action rather than one per
+clip. Labels, joins, levels and trims survive the move.
+
+The CLI is strict by design — `python script.py` still refuses to render a script
+with a path that is not there, and says which line.
+
+## Runbook
+
+| Command | Result |
+|---|---|
+| `python script.py <file>.md` | Render a script |
+| `python script.py templates\example.md` | Render the example template |
+| `python app.py` | UI in your browser at <http://127.0.0.1:8420> |
+| `python app.py --port 9000` | UI on another port |
+| `python app.py --no-browser` | Server only, no browser |
+| `npm install` | Install Electron (once) |
+| `npm start` | Desktop app |
+| `node desktop/launch.js` | Desktop app, bypassing npm |
+| `ffmpeg -version` | Check ffmpeg is on your PATH |
+
+- Stop with `Ctrl+C`, or close the app window.
+- `dry run: yes` under `## Output` prints the timeline and exits without rendering.

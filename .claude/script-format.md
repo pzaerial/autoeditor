@@ -19,7 +19,9 @@ timeline options are errors, reported with the line number and the valid set.
 | Heading | Aliases | Purpose |
 |---|---|---|
 | `## Output` | `Output Settings`, `Settings` | Where the file goes, what format it is |
+| `## Global Edits` | `Global`, `Globals`, `Master` | Edits over the whole video, or every clip alike |
 | `## Defaults` | `Default` | Fallbacks for timeline items |
+| `## Auto Editor` | `Auto Edit`, `Passes` | Opt-in passes: levelling |
 | `## Silence` | `Trim Silence`, `Dead Space` | Dead-space detection tuning |
 | `## Assets` | `Files`, `Sources` | Named shortcuts for reused clips |
 | `## Timeline` | `Sequence`, `Order` | The running order — required |
@@ -35,15 +37,52 @@ Keys are case- and punctuation-insensitive: `Fade In`, `fade_in`, `fade-in` and
 | `resolution` | `size` | `1920x1080` | `WxH`. Sources are letterboxed to fit |
 | `fps` | `frame rate`, `framerate` | `60` | Output frame rate |
 | `encoder` | `video encoder`, `codec` | `libx264` | See encoders below |
-| `fade in` | | `0.5` | Fade up from black at the very start (seconds) |
-| `fade out` | | `0.5` | Fade to black at the very end (seconds) |
+| `quality` | `crf`, `cq` | per encoder | Lower is better and bigger; CRF-like on every encoder |
 | `dry run` | | `no` | `yes` prints the resolved timeline and stops |
 
-Encoders with tuned quality flags: `libx264`, `libx265` (CPU); `h264_nvenc`,
-`hevc_nvenc` (NVIDIA); `h264_amf` (AMD); `h264_qsv` (Intel Quick Sync). Any
-other ffmpeg encoder name is passed through with `-preset fast -crf 18`.
+Encoders with tuned quality flags: `libx264` (18), `libx265` (22); `h264_nvenc`
+(23), `hevc_nvenc` (25), `av1_nvenc` (25); `h264_amf` (22), `hevc_amf` (24);
+`h264_qsv` (22), `hevc_qsv` (24) — the number in brackets is that encoder's
+default `quality`. Any other ffmpeg encoder name is passed through with
+`-preset fast -crf 18`.
+
+A hardware encoder renders roughly **twice as fast**: on a three-clip 1080p60
+edit, `libx264` took 12.4s and `h264_nvenc` 5.5s. It does not free the CPU,
+though — decoding every input and running the transitions is CPU work whatever
+encodes the result, and that alone accounted for 3.9s of those 5.5s. Expect a
+hardware render to be about twice as quick with the CPU still busy.
+
+Hardware encoders can be compiled into ffmpeg and still fail to open on a
+machine without that card. The app checks and greys out the ones it cannot use;
+from the CLI a wrong choice fails at the start of the render.
 
 Audio output is always AAC 192 kbps, 48 kHz stereo.
+
+## `## Global Edits`
+
+Edits that apply to the finished video, or uniformly to every clip in it. Joins
+between clips are *not* global — they belong to the timeline item.
+
+| Key | Aliases | Default | Description |
+|---|---|---|---|
+| `fade in` | | `0.5` | Fade up from black at the very start (seconds) |
+| `fade out` | | `0.5` | Fade to black at the very end (seconds) |
+| `audio adjust` | `audio gain`, `volume`, `gain` | `0` | dB added to every clip, on top of that clip's own `volume` |
+
+```markdown
+## Global Edits
+
+- fade in: 0.5
+- fade out: 1
+- audio adjust: -3 dB
+```
+
+`audio adjust` is a straight level change, applied per clip before any blend, so a
+crossfade still sounds like a crossfade. `+6` is roughly twice as loud, `-6` half.
+
+All three keys were originally written under `## Output` and are still read there,
+so an older script keeps rendering identically. If a key appears in both sections,
+`## Global Edits` wins. The app and `to_markdown()` always write them here.
 
 ## `## Defaults`
 
@@ -53,6 +92,42 @@ Audio output is always AAC 192 kbps, 48 kHz stereo.
 | `crossfade` | | `0.3` | Default crossfade length (seconds) |
 | `fade` | | `0.5` | Default fade-through-black length (seconds) |
 | `trim silence` | `trim` | `no` | Whether clips get dead-space removal by default |
+| `audio overlap` | `audio blend`, `audio crossfade` | *follow picture* | Default length of a join's audio transition (seconds) |
+| `audio lead` | `audio offset` | `0` | Default seconds the audio transition happens before the picture cut |
+
+## `## Auto Editor`
+
+Passes that edit the footage for you. Each is opt-in; with none on, clips render
+exactly as cut.
+
+| Key | Aliases | Default | Description |
+|---|---|---|---|
+| `balance audio` | `balance`, `balance levels` | `no` | Level every clip to the same loudness |
+| `audio target` | `target`, `target loudness` | `-14` | LUFS to level to; what YouTube normalises to |
+
+```markdown
+## Auto Editor
+
+- balance audio: yes
+- audio target: -14 LUFS
+```
+
+With this on, every clip is measured over the ranges the edit keeps and given
+the trim that lands it on the target.
+
+The measure is the median of its gated 400 ms loudness blocks — "the level it
+sits at most of the time" — rather than R128's integrated figure, which one loud
+moment can throw by tens of dB and which would otherwise let a single explosion
+decide the level of a two-hour recording. Peaks are not consulted at all; the
+render puts a limiter on the finished audio instead, so loud peaks stay loud
+without clipping. The trim never exceeds ±24 dB.
+
+The measurement is recorded per item as `balance N dB`, so it is done once. The
+app writes those when you tick the box; a render measures anything still
+unmeasured, which is what makes a hand-written script come out level too.
+
+`volume` is separate and adds to it: levelling sets the base, `volume` is your
+own adjustment on top, and neither overwrites the other.
 
 ## `## Silence`
 
@@ -111,9 +186,76 @@ ignored.
 | `fade [seconds]` | | Previous fades to black, this fades up from it |
 | `trim silence` | `trim`, `remove silence`, `remove dead space` | Remove dead air from this clip |
 | `keep silence` | `no trim`, `no trim silence` | Leave this clip's dead air alone |
+| `volume [dB]` | `gain`, `audio` | Level trim for this clip, added to `audio adjust` |
+| `balance [dB]` | | What levelling measured for this clip; written by the app, so it is not re-measured |
+| `audio overlap [seconds]` | `audio blend`, `audio crossfade` | Length of this join's audio transition; `auto` follows the picture |
+| `audio lead [seconds]` | `audio offset` | Seconds the audio transition happens before the picture cut |
+| `2:10-5:30` | `2:10 to 5:30` | Keep only this range of the source |
 
 A duration after `crossfade`/`fade` overrides the default for that join only.
 `crossfade 0` and `fade 0` are treated as `cut`.
+
+### Sound across a join
+
+By default a join's sound changes exactly where its picture does. `audio overlap`
+and `audio lead` separate the two, which is how you carry a music bed across a
+hard cut, or let the outgoing clip's sound run under the incoming picture.
+
+- **`audio overlap N`** — the audio transition is a crossfade `N` seconds long,
+  however the picture is joined. `-- cut, audio overlap 3` hard-cuts the picture
+  while the sound blends over three seconds.
+- **`audio lead N`** — the centre of that transition sits `N` seconds *before*
+  the picture cut. Positive is a J-cut, the incoming clip heard before it is
+  seen; negative is an L-cut, the outgoing clip still heard over the new
+  picture.
+
+```markdown
+4. `C:\Assets\outro.mp4` -- cut, audio overlap 3, audio lead 1
+```
+
+The overlap is paid for out of the clips' own source either side of the cut: the
+outgoing clip plays on past its out point, the incoming one starts before its in
+point. So the timeline never shifts, the total length is still the picture's, no
+silent gap appears, and only the join you asked about loses lock with its
+picture.
+
+That also means **a clip used to its very last frame has nothing to give**. Trim
+its picture back — with a range, or on the app's Edit page — and the material
+you trimmed becomes the handle the overlap plays from. Where the sources cannot
+cover the request it is reduced to what they can, and both the CLI and the app
+print how much was actually available.
+
+`volume` takes a signed number and an optional `dB`: `volume +4`, `gain -2.5 dB`,
+`audio 0`. It stacks with the project's `audio adjust`, so a `-3` project with a
+`+4` clip renders that clip at `+1`. It is matched against the raw option text,
+before options are normalised — that normaliser turns a minus into a space, which
+would otherwise read `volume -3` as a boost.
+
+### Ranges
+
+A range keeps only part of a source, which is how you pull sections out of a long stream:
+
+```markdown
+5. `C:\Footage\stream.mp4` -- 2:10-5:30, 41:00-52:20, trim silence
+```
+
+- Timecodes are `SS`, `MM:SS` or `HH:MM:SS`, with optional decimals (`0:05.25`).
+- Repeat the option for several ranges; they are sorted and kept in source order.
+- A clip with no range plays in full.
+- Ranges are clamped to the clip's real duration, so an end past the end is harmless.
+- The end must come after the start, or the script is rejected with its line number.
+- Ranges combine with `trim silence`: silence is removed from **within** the kept ranges.
+- A join written *after* a range applies to the range that follows it, so sections of one
+  clip can blend: `-- fade, 2:10-5:30, crossfade 0.5, 41:00-52:20`. The first join (before
+  any range) is still the clip's join to the previous clip.
+- Ranges must not overlap; overlapping ones are rejected with the line number.
+
+Ranges are matched before a timeline option is normalised, so their `-` survives; that is
+why `2:10-5:30` is unambiguous next to the ` -- ` separator.
+
+These are what the app's Edit page writes when you mark regions on a clip, and they parse
+back to the same edit — a render from the app and a `python script.py` render of its
+export produce identical output.
 
 ## Paths
 
