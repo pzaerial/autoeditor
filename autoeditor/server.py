@@ -1,486 +1,27 @@
-"""Local HTTP backend for the UI. Binds to 127.0.0.1 only."""
+"""Local HTTP backend for the UI. Binds to 127.0.0.1 only.
+
+Only HTTP lives here: reading requests, writing responses, and routing. What
+each route *means* belongs to the modules it calls -- `library` for the files on
+disk, `jobs` for work that outlives a request, `project` for the JSON shape the
+UI speaks.
+"""
 
 import json
 import mimetypes
-import os
-import re
 import subprocess
-import threading
-import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import project
-from .loudness import (
-    DEFAULT_TARGET_LUFS, MAX_GAIN_DB, balance_gain, measure_loudness,
-)
-from .ffmpeg_ops import (
-    audio_notes, encoder_available, encoder_default_quality, expand_regions,
-    probe_clip, probe_script, render_script,
-)
+from . import library, project
+from .encoders import ENCODER_CHOICES, encoder_available, encoder_default_quality
+from .jobs import BALANCE, JOB
+from .library import ROOT, TEMPLATE_DIR, probe_summary, template_target
 from .script_parser import ScriptError, check_output_path, parse_script
 from .script_writer import to_markdown
-from .sysmon import Sampler
-from .timeline import VIDEO_EXTENSIONS
 
-ROOT = Path(__file__).resolve().parent.parent
 UI_DIR = ROOT / "ui"
-TEMPLATE_DIR = ROOT / "templates"
-
-# Containers the preview window will open at all.
-PLAYABLE_CONTAINERS = {".mp4", ".m4v", ".webm", ".mov", ".mkv"}
-
-
-def _preview_problem(suffix: str) -> str:
-    """Why the preview cannot open this container, or "" when it can.
-
-    Only the container is judged here. Whether a *codec* decodes is a property
-    of the machine doing the decoding -- HEVC runs on the platform's hardware
-    path or not at all -- so the UI asks its own decoder about `vcodec` instead
-    of trusting a list written on someone else's computer.
-    """
-    if suffix not in PLAYABLE_CONTAINERS:
-        return f"{suffix.lstrip('.').upper()} files cannot be opened by the preview."
-    return ""
-
-
-# The pipeline, in order, so the UI can show where a long render actually is.
-# Probing and graph building are the slow, silent steps a bare progress bar hides.
-STAGES = [
-    ("validate", "Check output"),
-    ("probe", "Probe clips"),
-    ("silence", "Detect silence"),
-    ("graph", "Build filter graph"),
-    ("encode", "Encode"),
-    ("finish", "Finalise"),
-]
-
-# ffmpeg repeats these once per input; one copy is informative, forty is noise.
-_FFMPEG_NOISE = re.compile(
-    r"^\s*(Stream mapping:|\[?(swscaler|swresampler)|"
-    r"Last message repeated|frame=|Press \[q\])"
-)
-
-MAX_LOG = 4000
-
-
-class RenderJob:
-    """A render running on a background thread, pollable by the UI."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.sampler = Sampler()
-        self.reset()
-
-    def reset(self) -> None:
-        self.state = "idle"
-        self.progress = {"elapsed": 0.0, "total": 0.0, "pct": 0.0, "speed": ""}
-        self.log: list[dict] = []
-        self.stages = [
-            {"key": k, "label": label, "state": "pending", "detail": "", "seconds": 0.0}
-            for k, label in STAGES
-        ]
-        self.error = ""
-        self.output = ""
-        self.started = time.monotonic()
-        self.process: subprocess.Popen | None = None
-
-    # -- log -------------------------------------------------------------
-
-    def _write(self, text: str, source: str) -> None:
-        with self.lock:
-            self.log.append({
-                "t": round(time.monotonic() - self.started, 1),
-                "src": source,
-                "text": text,
-            })
-            if len(self.log) > MAX_LOG:
-                del self.log[: len(self.log) - MAX_LOG]
-
-    def say(self, message: str) -> None:
-        self._write(message, "app")
-
-    def from_ffmpeg(self, line: str) -> None:
-        if line.strip() and not _FFMPEG_NOISE.match(line):
-            self._write(line, "ffmpeg")
-
-    # -- stages ----------------------------------------------------------
-
-    def _stage(self, key: str, state: str, detail: str = "") -> None:
-        with self.lock:
-            now = time.monotonic()
-            for stage in self.stages:
-                if stage["key"] != key:
-                    continue
-                if state == "running" and stage["state"] == "pending":
-                    stage["_at"] = now
-                if state in ("done", "failed"):
-                    stage["seconds"] = round(now - stage.get("_at", now), 1)
-                stage["state"] = state
-                if detail:
-                    stage["detail"] = detail
-
-    def _detail(self, key: str, detail: str) -> None:
-        with self.lock:
-            for stage in self.stages:
-                if stage["key"] == key:
-                    stage["detail"] = detail
-
-    def _fail_running_stages(self) -> None:
-        with self.lock:
-            for stage in self.stages:
-                if stage["state"] == "running":
-                    stage["state"] = "failed"
-
-    def snapshot(self, since: int = 0) -> dict:
-        """State plus only the log lines the caller has not seen yet."""
-        with self.lock:
-            total = len(self.log)
-            since = max(0, min(since, total))
-            return {
-                "state": self.state,
-                "progress": dict(self.progress),
-                "stages": [
-                    {k: v for k, v in stage.items() if not k.startswith("_")}
-                    for stage in self.stages
-                ],
-                "log": self.log[since:],
-                "log_from": since,
-                "log_total": total,
-                "samples": self.sampler.samples(),
-                "has_gpu": self.sampler.has_gpu,
-                "error": self.error,
-                "output": self.output,
-                "elapsed": round(time.monotonic() - self.started, 1),
-            }
-
-    # -- lifecycle -------------------------------------------------------
-
-    def start(self, script) -> None:
-        with self.lock:
-            if self.state in ("probing", "rendering"):
-                raise RuntimeError("a render is already running")
-            self.reset()
-            self.state = "probing"
-        self.sampler.start()
-        threading.Thread(target=self._run, args=(script,), daemon=True).start()
-
-    def cancel(self) -> None:
-        with self.lock:
-            proc, running = self.process, self.state in ("probing", "rendering")
-            if running:
-                self.state = "cancelled"
-        if proc and proc.poll() is None:
-            proc.terminate()
-
-    def _run(self, script) -> None:
-        try:
-            self._stage("validate", "running")
-            check_output_path(script.output.file)
-            self._stage("validate", "done", str(script.output.file))
-
-            clips = expand_regions(script.clips)
-            detecting = any(c.trim_silence for c in clips)
-            if not detecting:
-                self._stage("silence", "skipped", "no clip asks for it")
-
-            self._stage("probe", "running", f"0 / {len(clips)}")
-            if detecting:
-                self._stage("silence", "running")
-            self.say(f"Probing {len(clips)} clips...")
-
-            def on_step(done, total, message):
-                self._detail("probe", f"{done} / {total} - {message}")
-                if detecting and "silence" in message:
-                    self._detail("silence", message)
-
-            infos = probe_script(script, verbose=False, on_step=on_step)
-            self._stage("probe", "done", f"{len(clips)} clips")
-            if detecting:
-                self._stage("silence", "done")
-
-            for note in audio_notes(script, infos):
-                self.say(f"  warning: {note}")
-
-            for clip, info in zip(clips, infos):
-                if info.keep_intervals:
-                    kept = sum(b - a for a, b in info.keep_intervals)
-                    self.say(
-                        f"  {clip.label}: {len(info.keep_intervals)} segment(s), "
-                        f"{kept:.1f}s of {info.duration:.1f}s"
-                    )
-
-            with self.lock:
-                if self.state == "cancelled":
-                    return
-                self.state = "rendering"
-
-            def on_progress(elapsed, total, pct, speed):
-                with self.lock:
-                    self.progress = {
-                        "elapsed": elapsed, "total": total, "pct": pct, "speed": speed
-                    }
-
-            def on_start(proc):
-                with self.lock:
-                    self.process = proc
-                # The graph is finished before ffmpeg is spawned.
-                self._stage("graph", "done")
-                self._stage("encode", "running")
-
-            def on_stage(key, detail):
-                self._stage(key, "running", detail)
-                self.say(
-                    f"Building filter graph ({detail})..." if key == "graph"
-                    else f"Encoding: {detail}"
-                )
-
-            render_script(
-                script, infos, verbose=False,
-                on_progress=on_progress, on_start=on_start,
-                on_stderr=self.from_ffmpeg, on_stage=on_stage,
-            )
-
-            with self.lock:
-                cancelled = self.state == "cancelled"
-            if cancelled:
-                self._fail_running_stages()
-                self.say("Cancelled.")
-                return
-
-            self._stage("encode", "done")
-            self._stage("finish", "running")
-            with self.lock:
-                self.state = "done"
-                self.output = str(script.output.file)
-                self.progress["pct"] = 100.0
-            self._stage("finish", "done", str(script.output.file))
-            self.say(f"Done: {script.output.file}")
-
-        except Exception as exc:
-            with self.lock:
-                cancelled = self.state == "cancelled"
-                if not cancelled:
-                    self.state = "error"
-                    self.error = str(exc)
-            self._fail_running_stages()
-            if cancelled:
-                self.say("Cancelled.")
-                return
-            detail = getattr(exc, "stderr", "") or ""
-            for line in detail.strip().splitlines()[-25:]:
-                self.from_ffmpeg(line)
-            self.say(f"Error: {exc}")
-        finally:
-            self.sampler.stop()
-
-
-JOB = RenderJob()
-
-
-class BalanceJob:
-    """Loudness measurement running on a background thread, pollable by the UI.
-
-    Measuring reads every clip's audio, which for a two-hour recording is a real
-    wait. Doing it inside the request meant the page could only say "measuring"
-    and hope; a job can say how far it has got and be called off.
-    """
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.reset()
-
-    def reset(self) -> None:
-        self.state = "idle"
-        self.clips: list[dict] = []
-        self.current = ""
-        self.done_seconds = 0.0
-        self.total_seconds = 0.0
-        self.error = ""
-        self.process: subprocess.Popen | None = None
-
-    def snapshot(self) -> dict:
-        with self.lock:
-            total = self.total_seconds
-            return {
-                "state": self.state,
-                "clips": list(self.clips),
-                "current": self.current,
-                # Weighted by how much audio each clip contributes, so one long
-                # clip among short ones does not sit at 0% and then finish.
-                "pct": round(min(100.0, 100.0 * self.done_seconds / total), 1) if total else 0.0,
-                "done_seconds": round(self.done_seconds, 1),
-                "total_seconds": round(total, 1),
-                "error": self.error,
-            }
-
-    def start(self, script, target: float, only_unmeasured: bool) -> None:
-        with self.lock:
-            if self.state == "running":
-                raise RuntimeError("a measurement is already running")
-            self.reset()
-            self.state = "running"
-        threading.Thread(
-            target=self._run, args=(script, target, only_unmeasured), daemon=True
-        ).start()
-
-    def cancel(self) -> None:
-        with self.lock:
-            proc = self.process
-            if self.state == "running":
-                self.state = "cancelled"
-        if proc and proc.poll() is None:
-            proc.terminate()
-
-    def _plan(self, script, only_unmeasured: bool) -> list[dict]:
-        """What has to be measured, and how much audio each one is."""
-        work = []
-        for index, clip in enumerate(script.clips):
-            if only_unmeasured and clip.balance_db is not None:
-                continue
-            entry = {
-                "index": index, "label": clip.label, "gain": None, "note": "",
-                "path": clip.path, "spans": None, "seconds": 0.0,
-            }
-            if clip.missing or not clip.path.is_file():
-                entry["note"] = "file not found"
-            else:
-                try:
-                    info = probe_clip(clip.path)
-                except Exception:
-                    entry["note"] = "unreadable"
-                else:
-                    if not info.has_audio:
-                        entry["note"] = "no audio track"
-                    else:
-                        spans = [r.as_tuple() for r in clip.regions] if clip.regions else None
-                        entry["spans"] = spans
-                        entry["seconds"] = (
-                            sum(b - a for a, b in spans) if spans else info.duration
-                        )
-            work.append(entry)
-        return work
-
-    def _run(self, script, target: float, only_unmeasured: bool) -> None:
-        try:
-            work = self._plan(script, only_unmeasured)
-            with self.lock:
-                self.total_seconds = sum(w["seconds"] for w in work) or 1.0
-                self.clips = [
-                    {k: v for k, v in w.items() if k not in ("path", "spans")}
-                    for w in work
-                ]
-
-            cache: dict[tuple, object] = {}
-            for position, item in enumerate(work):
-                with self.lock:
-                    if self.state == "cancelled":
-                        return
-                    self.current = item["label"]
-                if item["note"]:
-                    with self.lock:
-                        self.done_seconds += item["seconds"]
-                    continue
-
-                base = self.done_seconds
-                key = (item["path"], tuple(item["spans"]) if item["spans"] else None)
-                if key in cache:
-                    measured = cache[key]
-                else:
-                    def progress(seconds: float, base=base) -> None:
-                        with self.lock:
-                            self.done_seconds = base + seconds
-
-                    def started(proc) -> None:
-                        with self.lock:
-                            self.process = proc
-
-                    measured = measure_loudness(
-                        item["path"], item["spans"],
-                        on_progress=progress, on_start=started,
-                    )
-                    cache[key] = measured
-
-                with self.lock:
-                    if self.state == "cancelled":
-                        return
-                    self.done_seconds = base + item["seconds"]
-                    entry = self.clips[position]
-                    if measured is None or not measured.usable:
-                        entry["note"] = "silent or unmeasurable"
-                    else:
-                        gain = balance_gain(measured, target)
-                        entry.update(
-                            lufs=round(measured.lufs, 1),
-                            peak=round(measured.peak_dbtp, 1),
-                            gain=gain,
-                        )
-                        if abs(gain) >= MAX_GAIN_DB - 0.05:
-                            entry["note"] = f"limited to {gain:+g} dB"
-
-            with self.lock:
-                if self.state == "running":
-                    self.state = "done"
-                    self.done_seconds = self.total_seconds
-                    self.current = ""
-        except Exception as exc:
-            with self.lock:
-                if self.state == "running":
-                    self.state = "error"
-                    self.error = str(exc)
-
-
-BALANCE = BalanceJob()
-
-
-ENCODER_CHOICES = [
-    ("libx264", "libx264 - CPU"),
-    ("h264_nvenc", "h264_nvenc - NVIDIA"),
-    ("h264_amf", "h264_amf - AMD"),
-    ("h264_qsv", "h264_qsv - Intel"),
-    ("libx265", "libx265 - CPU, HEVC"),
-    ("hevc_nvenc", "hevc_nvenc - NVIDIA, HEVC"),
-]
-
-_SAFE_NAME = re.compile(r"[^\w .#()\[\]&,+-]+")
-
-
-def _template_target(raw: str, title: str) -> Path:
-    """Where Save As writes: a bare name lands in templates/, a path is honoured."""
-    text = (raw or title or "template").strip().strip('"')
-    path = Path(text)
-    if not path.suffix:
-        path = path.with_suffix(".md")
-    if path.parent == Path("."):
-        path = TEMPLATE_DIR / _SAFE_NAME.sub("-", path.name)
-    return path
-
-
-def _probe_summary(path: Path) -> dict:
-    """Metadata for one file, tolerating anything ffprobe cannot read."""
-    suffix = path.suffix.lower()
-    entry = {
-        "path": str(path),
-        "name": path.name,
-        "size": path.stat().st_size if path.is_file() else 0,
-    }
-    info = None
-    try:
-        info = probe_clip(path)
-        entry.update(
-            duration=info.duration, width=info.width, height=info.height,
-            fps=round(info.fps, 3), has_audio=info.has_audio,
-            vcodec=info.vcodec, acodec=info.acodec, pix_fmt=info.pix_fmt,
-        )
-    except Exception as exc:
-        entry["error"] = str(exc)
-
-    problem = _preview_problem(suffix)
-    entry["playable"] = not problem
-    entry["preview_note"] = problem
-    return entry
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -619,13 +160,7 @@ class Handler(BaseHTTPRequestHandler):
         query = self._query()
         try:
             if route == "/api/templates":
-                self._json({
-                    "dir": str(TEMPLATE_DIR),
-                    "templates": [
-                        {"name": p.stem, "path": str(p)}
-                        for p in sorted(TEMPLATE_DIR.glob("*.md"))
-                    ],
-                })
+                self._json({"dir": str(TEMPLATE_DIR), "templates": library.templates()})
 
             elif route == "/api/template":
                 script = parse_script(Path(query["path"]), strict=False)
@@ -647,16 +182,16 @@ class Handler(BaseHTTPRequestHandler):
                 ]})
 
             elif route == "/api/browse":
-                self._json(self._browse(query.get("path", "")))
+                self._json(library.browse(query.get("path", "")))
 
             elif route == "/api/probe":
-                self._json(_probe_summary(Path(query["path"])))
+                self._json(probe_summary(Path(query["path"])))
 
             elif route == "/api/render":
                 self._json(JOB.snapshot(int(query.get("since", 0) or 0)))
 
             elif route == "/api/check-output":
-                self._json(self._check_output(query.get("path", "")))
+                self._json(library.check_output(query.get("path", "")))
 
             elif route == "/media":
                 self._serve_media(Path(unquote(query["path"])))
@@ -683,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/save-template":
                 data = self._body()
                 script = project.from_json(data["project"])
-                target = _template_target(data.get("path", ""), script.title)
+                target = template_target(data.get("path", ""), script.title)
                 check_output_path(target)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(
@@ -715,11 +250,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(JOB.snapshot())
 
             elif route == "/api/reveal":
-                target = Path(self._body()["path"])
-                folder = target if target.is_dir() else target.parent
-                if folder.is_dir():
-                    os.startfile(folder)  # noqa: S606 -- local desktop tool
-                self._json({"ok": True})
+                self._json({"ok": library.reveal(Path(self._body()["path"]))})
 
             else:
                 self._fail("unknown endpoint", 404)
@@ -732,45 +263,6 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._fail(str(exc), 500)
 
-    # -- data ------------------------------------------------------------
-
-    def _browse(self, raw: str) -> dict:
-        folder = Path(raw).expanduser() if raw else Path.home()
-        if not folder.is_dir():
-            folder = Path.home()
-        folder = folder.resolve()
-
-        dirs, files = [], []
-        try:
-            for entry in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
-                if entry.name.startswith("."):
-                    continue
-                if entry.is_dir():
-                    dirs.append({"name": entry.name, "path": str(entry)})
-                elif entry.suffix.lower() in VIDEO_EXTENSIONS:
-                    files.append(entry)
-        except PermissionError:
-            pass
-
-        files.sort(key=lambda p: (p.stat().st_mtime, p.name))
-        return {
-            "path": str(folder),
-            "parent": str(folder.parent) if folder.parent != folder else "",
-            "dirs": dirs,
-            "files": [_probe_summary(f) for f in files],
-        }
-
-    def _check_output(self, raw: str) -> dict:
-        if not raw.strip():
-            return {"ok": False, "error": "no output file set"}
-        try:
-            check_output_path(Path(raw))
-        except ScriptError as exc:
-            return {"ok": False, "error": str(exc)}
-        parent = Path(raw).parent
-        return {"ok": True, "exists": Path(raw).is_file(), "folder_exists": parent.is_dir()}
-
 
 def serve(host: str = "127.0.0.1", port: int = 8420) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((host, port), Handler)
-    return httpd
+    return ThreadingHTTPServer((host, port), Handler)

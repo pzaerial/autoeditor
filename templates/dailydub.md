@@ -29,7 +29,7 @@ Any episode notes can go here.
 ## Assets
 
 - intro: `E:\Content Creation\pZ_aeriaL\Assets\Video Assets\Intro\pZ_aeriaL Video Intro 1.mp4`
-- outro: `E:\Content Creation\pZ_aeriaL\Assets\Video Assets\Outro\pZ_aeriaL Video Outro 6.mp4`
+- outro: `E:\Content Creation\pZ_aeriaL\Assets\Video Assets\Outro\pZ_aeriaL Video Outro 4.mp4`
 
 ## Timeline
 

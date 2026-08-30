@@ -106,13 +106,14 @@ alone was 3.9s of those 5.5s.
 
 | Key | Default | Value |
 |---|---|---|
-| `join` | `crossfade` | `cut`, `crossfade` or `fade` |
+| `join` | `crossfade` | `cut`, `crossfade`, `fade` or `audio overlap` |
 | `crossfade` | `0.3` | seconds |
 | `fade` | `0.5` | seconds |
-| `trim silence` | `no` | `yes` / `no` |
+| `audio overlap` | `2` | seconds; default length for an `audio overlap` join |
 | `fade in` | `0.5` | seconds, up from black at the start |
 | `fade out` | `0.5` | seconds, to black at the end |
-| `audio overlap` | *follow picture* | seconds; default length of a join's audio transition |
+| `trim silence` | `no` | `yes` / `no` |
+| `audio blend` | *follow picture* | seconds; default length of a join's audio transition |
 | `audio lead` | `0` | seconds the audio transition runs ahead of the picture cut |
 
 ### Silence
@@ -142,10 +143,11 @@ Options apply to the join with the **previous** item; the first item's join is i
 | `cut` | hard cut |
 | `crossfade [s]` | blend with previous |
 | `fade [s]` | previous to black, this up from black |
+| `audio overlap [s]` | heard before it is seen: sound starts early, and that much picture is dropped so the two stay locked |
 | `trim silence` | remove dead air |
 | `keep silence` | override a `trim silence` default |
 | `volume [dB]` | level trim for this clip; `gain` and `audio` are aliases |
-| `audio overlap [s]` | length of this join's audio transition; `auto` follows the picture |
+| `audio blend [s]` | length of this join's audio transition; `auto` follows the picture |
 | `audio lead [s]` | seconds the audio transition happens before the picture cut |
 | `2:10-5:30` | keep only this range; repeat for more |
 
@@ -173,11 +175,11 @@ removed from within the kept ranges. Written by the app's Edit page.
 
 ### Sound across a join
 
-`audio overlap` and `audio lead` let the sound change hands somewhere other than
+`audio blend` and `audio lead` let the sound change hands somewhere other than
 the picture cut — a music bed carried over a hard cut, a J-cut, an L-cut:
 
 ```markdown
-4. `C:\Assets\outro.mp4` -- cut, audio overlap 3, audio lead 1
+4. `C:\Assets\outro.mp4` -- cut, audio blend 3, audio lead 1
 ```
 
 The overlap is played from the clips' own source either side of the cut, so the

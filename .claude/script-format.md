@@ -103,6 +103,35 @@ unmeasured, which is what makes a hand-written script come out level too.
 `volume` is separate and adds to it: levelling sets the base, `volume` is your
 own adjustment on top, and neither overwrites the other.
 
+## `## Defaults`
+
+How clips are joined: to each other, and to the black either end. Aliases:
+`## Default`, `## Joins`, `## Global Edits`.
+
+| Key | Aliases | Default | Description |
+|---|---|---|---|
+| `join` | `transition` | `crossfade` | Join used when a timeline item does not state one |
+| `crossfade` | | `0.3` | Default crossfade length (seconds) |
+| `fade` | | `0.5` | Default fade-through-black length (seconds) |
+| `audio overlap` | `prelap`, `audio first` | `2` | Default length for an `audio overlap` join (seconds) |
+| `fade in` | | `0.5` | Fade up from black at the very start (seconds) |
+| `fade out` | | `0.5` | Fade to black at the very end (seconds) |
+| `trim silence` | `trim` | `no` | Whether clips get dead-space removal by default |
+| `audio blend` | `audio crossfade` | *follow picture* | Default length of a join's audio transition (seconds) |
+| `audio lead` | `audio offset` | `0` | Default seconds the audio transition happens before the picture cut |
+
+```markdown
+## Defaults
+
+- join: crossfade
+- crossfade: 0.3
+- fade: 0.5
+- audio overlap: 2
+- fade in: 0.5
+- fade out: 0.5
+- trim silence: no
+```
+
 ## `## Silence`
 
 Detection is per clip and relative to that clip's own peak loudness, so it
@@ -158,16 +187,51 @@ ignored.
 | `cut` | `hard cut` | Hard cut from the previous clip |
 | `crossfade [seconds]` | `dissolve` | Blend with the previous clip |
 | `fade [seconds]` | | Previous fades to black, this fades up from it |
+| `audio overlap [seconds]` | `audio first`, `prelap`, `j-cut` | This clip is *heard* that many seconds before it is *seen* |
 | `trim silence` | `trim`, `remove silence`, `remove dead space` | Remove dead air from this clip |
 | `keep silence` | `no trim`, `no trim silence` | Leave this clip's dead air alone |
 | `volume [dB]` | `gain`, `audio` | Level trim for this clip, added to whatever levelling set |
 | `balance [dB]` | | What levelling measured for this clip; written by the app, so it is not re-measured |
-| `audio overlap [seconds]` | `audio blend`, `audio crossfade` | Length of this join's audio transition; `auto` follows the picture |
+| `audio blend [seconds]` | `audio crossfade` | Length of this join's audio transition; `auto` follows the picture |
 | `audio lead [seconds]` | `audio offset` | Seconds the audio transition happens before the picture cut |
 | `2:10-5:30` | `2:10 to 5:30` | Keep only this range of the source |
 
 A duration after `crossfade`/`fade` overrides the default for that join only.
 `crossfade 0` and `fade 0` are treated as `cut`.
+
+### `audio overlap` — heard before it is seen
+
+```markdown
+4. `C:\Assets\outro.mp4` -- audio overlap 10
+```
+
+The picture cuts as usual, but this clip's sound starts ten seconds earlier, under
+the picture of the clip before it. To pay for that, **the first ten seconds of this
+clip's picture are dropped**: at the cut you see it already ten seconds in, exactly
+where its own sound has reached. Sound and picture stay locked to each other; only
+their arrival is staggered.
+
+That is what makes it different from `audio lead`, which slides a join's sound off
+its picture and needs spare source either side of the cut to do it. An `audio
+overlap` join needs no handles at all — it takes the sound from the picture it gave
+up. The cost is length: a ten-second overlap makes the finished video ten seconds
+shorter, because that much picture is gone.
+
+It is the natural join for an intro or outro with a music bed: the music starts under
+the last shot, then the picture cuts to it already playing.
+
+Both sides ramp across the **whole** overlap — the incoming rising as the outgoing
+falls — so a ten-second overlap is a ten-second crossfade, not a quick handover with
+a long tail. `audio blend` shortens the ramp if you want the change to happen faster
+than the overlap itself.
+
+### Crossfade shape
+
+Audio crossfades use an **equal-power** curve (a quarter-sine pair). Two unrelated
+signals ramped linearly sum to about −3 dB where they meet, so a linear crossfade
+sags in the middle; equal power holds the level flat because sin² + cos² = 1. The
+difference is inaudible across a 0.3 s join and obvious across ten seconds, which is
+the length an `audio overlap` join tends to be.
 
 ### Sound across a join
 
@@ -175,7 +239,7 @@ By default a join's sound changes exactly where its picture does. `audio overlap
 and `audio lead` separate the two, which is how you carry a music bed across a
 hard cut, or let the outgoing clip's sound run under the incoming picture.
 
-- **`audio overlap N`** — the audio transition is a crossfade `N` seconds long,
+- **`audio blend N`** — the audio transition is a crossfade `N` seconds long,
   however the picture is joined. `-- cut, audio overlap 3` hard-cuts the picture
   while the sound blends over three seconds.
 - **`audio lead N`** — the centre of that transition sits `N` seconds *before*
@@ -184,7 +248,7 @@ hard cut, or let the outgoing clip's sound run under the incoming picture.
   picture.
 
 ```markdown
-4. `C:\Assets\outro.mp4` -- cut, audio overlap 3, audio lead 1
+4. `C:\Assets\outro.mp4` -- cut, audio blend 3, audio lead 1
 ```
 
 The overlap is paid for out of the clips' own source either side of the cut: the

@@ -14,6 +14,10 @@ model and can export it back to markdown.
 **Stack:** Python 3.10+ (stdlib only), ffmpeg/ffprobe on PATH
 **Input:** `.mp4` `.mov` `.mkv` `.avi` `.m4v` `.webm` `.wmv` `.flv` — **Output:** h264/aac mp4
 
+**Layout:** `autoeditor/` is the engine plus the local server; `ui/js/` is the front end as
+ES modules; `desktop/` is the Electron shell. The engine never imports the server, which is
+what keeps a CLI render and an app render the same render.
+
 See also:
 - [architecture.md](architecture.md) — modules and what each one does
 - [pipeline.md](pipeline.md) — how a script becomes a filter graph

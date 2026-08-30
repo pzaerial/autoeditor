@@ -184,9 +184,19 @@ _JOIN_WORDS = {
     "crossfade": Join.CROSSFADE,
     "dissolve": Join.CROSSFADE,
     "fade": Join.FADE,
+    "audio overlap": Join.AUDIO_OVERLAP,
+    "audio first": Join.AUDIO_OVERLAP,
+    "prelap": Join.AUDIO_OVERLAP,
+    "pre lap": Join.AUDIO_OVERLAP,
+    "jcut": Join.AUDIO_OVERLAP,
+    "j cut": Join.AUDIO_OVERLAP,
 }
 
-_JOIN_OPTION_RE = re.compile(r"^(hard cut|cut|crossfade|dissolve|fade)\s*(.*)$")
+_JOIN_OPTION_RE = re.compile(
+    r"^(audio overlap|audio first|prelap|pre lap|jcut|j cut|hard cut|cut"
+    r"|crossfade|dissolve|fade)"
+    r"\s*(.*)$"
+)
 # `volume +3 dB`, `gain -2`, `audio 1.5` -- a straight level trim for one clip.
 _GAIN_OPTION_RE = re.compile(r"^(volume|gain|audio)\s+([+-]?[\d.]+\s*(?:db)?)$")
 # `balance +8.2 dB` -- what levelling measured, written back so a render need
@@ -194,11 +204,11 @@ _GAIN_OPTION_RE = re.compile(r"^(volume|gain|audio)\s+([+-]?[\d.]+\s*(?:db)?)$")
 _BALANCE_OPTION_RE = re.compile(r"^balance\s+([+-]?[\d.]+\s*(?:db)?)$")
 # `audio overlap 2`, `audio lead -1.5` -- where this join's sound sits.
 _AUDIO_EDIT_RE = re.compile(
-    r"^audio\s+(overlap|blend|crossfade|lead|offset)\s+"
+    r"^audio\s+(blend|crossfade|lead|offset)\s+"
     r"([+-]?[\d.]+\s*(?:s|sec|secs|seconds)?|auto|follow)$"
 )
 _AUDIO_EDIT_KEYS = {
-    "overlap": "audio_overlap", "blend": "audio_overlap", "crossfade": "audio_overlap",
+    "blend": "audio_blend", "crossfade": "audio_blend",
     "lead": "audio_lead", "offset": "audio_lead",
 }
 _REGION_RE = re.compile(r"^([\d:.]+)\s*(?:-|to|–|—)\s*([\d:.]+)$")
@@ -210,11 +220,11 @@ class ItemOptions:
     duration: float | None = None
     trim: bool | None = None
     gain_db: float | None = None
-    audio_overlap: float | None = None
+    audio_blend: float | None = None
     audio_lead: float | None = None
     balance_db: float | None = None
-    # `audio overlap auto` asks for None, which a plain None cannot express.
-    audio_overlap_auto: bool = False
+    # `audio blend auto` asks for None, which a plain None cannot express.
+    audio_blend_auto: bool = False
     regions: list[Region] = field(default_factory=list)
 
 
@@ -256,7 +266,7 @@ def _parse_options(text: str, line: int) -> ItemOptions:
             if value in ("auto", "follow"):
                 if field == "audio_lead":
                     raise ScriptError("audio lead needs a number of seconds", line)
-                opts.audio_overlap_auto = True
+                opts.audio_blend_auto = True
             else:
                 setattr(opts, field, _parse_number(value, edit_option.group(1), line))
             continue
@@ -294,7 +304,7 @@ def _parse_options(text: str, line: int) -> ItemOptions:
             raise ScriptError(
                 f"unknown timeline option {raw_option.strip()!r}. Valid: cut, "
                 "crossfade [seconds], fade [seconds], trim silence, keep silence, "
-                "volume [dB], balance [dB], audio overlap [seconds], "
+                "volume [dB], balance [dB], audio blend [seconds], "
                 "audio lead [seconds], "
                 "or a range like 2:10-5:30",
                 line,
@@ -332,6 +342,8 @@ def _default_duration(join: Join, defaults: Defaults) -> float:
         return defaults.crossfade
     if join is Join.FADE:
         return defaults.fade
+    if join is Join.AUDIO_OVERLAP:
+        return defaults.audio_overlap
     return 0.0
 
 
@@ -374,10 +386,11 @@ _DEFAULT_KEYS = {
     "join": "join", "transition": "join",
     "crossfade": "crossfade",
     "fade": "fade",
+    "audio overlap": "audio_overlap", "prelap": "audio_overlap",
+    "audio first": "audio_overlap",
     "trim silence": "trim_silence", "trim": "trim_silence",
     "fade in": "fade_in", "fade out": "fade_out",
-    "audio overlap": "audio_overlap", "audio blend": "audio_overlap",
-    "audio crossfade": "audio_overlap",
+    "audio blend": "audio_blend", "audio crossfade": "audio_blend",
     "audio lead": "audio_lead", "audio offset": "audio_lead",
 }
 
@@ -575,12 +588,12 @@ def _build_clips(
 
         # None means "sound follows picture"; an explicit `auto` asks for that
         # back when the project as a whole has been given an overlap.
-        if opts.audio_overlap_auto:
-            overlap = None
-        elif opts.audio_overlap is not None:
-            overlap = opts.audio_overlap
+        if opts.audio_blend_auto:
+            blend = None
+        elif opts.audio_blend is not None:
+            blend = opts.audio_blend
         else:
-            overlap = defaults.audio_overlap
+            blend = defaults.audio_blend
         lead = opts.audio_lead if opts.audio_lead is not None else defaults.audio_lead
 
         # A zero-length blend is a cut; collapse it so the graph has no degenerate filters.
@@ -603,7 +616,7 @@ def _build_clips(
                     trim_silence=trim,
                     audio_gain_db=gain,
                     balance_db=opts.balance_db,
-                    audio_overlap=overlap,
+                    audio_blend=blend,
                     audio_lead=lead,
                     line=lineno,
                     regions=regions,

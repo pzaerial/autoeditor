@@ -127,12 +127,14 @@
                 <option value="crossfade">crossfade</option>
                 <option value="cut">cut</option>
                 <option value="fade">fade</option>
+                <option value="audio overlap">audio overlap</option>
               </select>
             </label>
             <label>Crossfade (s) <input type="number" id="def-crossfade" value="0.3" step="0.1" min="0"></label>
             <label>Fade (s) <input type="number" id="def-fade" value="0.5" step="0.1" min="0"></label>
-            <label>Audio overlap (s)
-              <input type="number" id="def-audio-overlap" step="0.1" min="0" placeholder="follow picture">
+            <label>Audio overlap (s) <input type="number" id="def-audio-overlap" value="2" step="0.5" min="0"></label>
+            <label>Audio blend (s)
+              <input type="number" id="def-audio-blend" step="0.1" min="0" placeholder="follow picture">
             </label>
             <label>Audio lead (s) <input type="number" id="def-audio-lead" value="0" step="0.1"></label>
           </div>
@@ -219,6 +221,7 @@
                 <option value="crossfade">crossfade</option>
                 <option value="cut">cut</option>
                 <option value="fade">fade</option>
+                <option value="audio overlap">audio overlap</option>
               </select>
             </label>
             <label>Seconds
@@ -247,8 +250,8 @@
 
         <div class="audio-bar" id="join-audio-bar">
           <span class="audio-label">Join audio</span>
-          <label class="inline">Overlap (s)
-            <input type="number" id="clip-audio-overlap" step="0.1" min="0" placeholder="follow">
+          <label class="inline">Blend (s)
+            <input type="number" id="clip-audio-blend" step="0.1" min="0" placeholder="follow">
           </label>
           <label class="inline">Lead (s)
             <input type="number" id="clip-audio-lead" step="0.1" value="0">
@@ -366,6 +369,6 @@
 
 <div id="toast" class="toast"></div>
 
-<script src="app.js"></script>
+<script type="module" src="js/main.js"></script>
 </body>
 </html>

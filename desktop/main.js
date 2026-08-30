@@ -1,7 +1,7 @@
 // Electron shell: spawns the Python backend, then shows it in a native window.
 // The UI itself is the same code a browser gets from `python app.py`.
 
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { spawn } = require("child_process");
 const net = require("net");
 const path = require("path");
@@ -24,18 +24,31 @@ function freePort() {
   });
 }
 
-/** Resolve the python command, preferring a local .venv if one exists. */
-function pythonCommand() {
+/**
+ * How to start the backend. A packaged build ships it frozen next to the app
+ * and needs no Python at all; a checkout runs it from source, preferring a
+ * local .venv. Looking for the frozen one first is what lets the same shell
+ * serve both without a build flag.
+ */
+function backendCommand() {
+  const fs = require("fs");
+  const exe = process.platform === "win32" ? "autoeditor-backend.exe" : "autoeditor-backend";
+  for (const dir of [process.resourcesPath || "", ROOT]) {
+    const frozen = path.join(dir, "backend", exe);
+    if (dir && fs.existsSync(frozen)) return { command: frozen, args: [] };
+  }
   const venv = process.platform === "win32"
     ? path.join(ROOT, ".venv", "Scripts", "python.exe")
     : path.join(ROOT, ".venv", "bin", "python");
-  if (require("fs").existsSync(venv)) return venv;
-  return process.platform === "win32" ? "python" : "python3";
+  const python = fs.existsSync(venv)
+    ? venv
+    : (process.platform === "win32" ? "python" : "python3");
+  return { command: python, args: ["app.py"] };
 }
 
 function startBackend() {
-  const command = pythonCommand();
-  backend = spawn(command, ["app.py", "--port", String(port), "--no-browser"], {
+  const { command, args } = backendCommand();
+  backend = spawn(command, [...args, "--port", String(port), "--no-browser"], {
     cwd: ROOT,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -93,7 +106,11 @@ function createWindow() {
     backgroundColor: "#14161a",
     title: "Auto Editor",
     show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: true },
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "preload.js"),
+    },
   });
 
   win.removeMenu();
@@ -106,6 +123,15 @@ function createWindow() {
     return { action: "deny" };
   });
 }
+
+// Revealing a file has to happen here rather than in the backend: Windows only
+// lets the foreground process pass focus along, and that is this process.
+ipcMain.handle("desktop:reveal", (_event, target) => {
+  const fs = require("fs");
+  if (!target || !fs.existsSync(target)) return false;
+  shell.showItemInFolder(path.normalize(target));
+  return true;
+});
 
 app.whenReady().then(async () => {
   try {

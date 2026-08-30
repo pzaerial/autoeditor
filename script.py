@@ -4,7 +4,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from autoeditor.ffmpeg_ops import audio_notes, format_time, probe_script, render_script
+from autoeditor.graph import audio_notes
+from autoeditor.probe import probe_script
+from autoeditor.render import render_script
+from autoeditor.timecode import format_time
 from autoeditor.script_parser import ScriptError, parse_script
 
 USAGE = "usage: python script.py <script.md>"

@@ -15,16 +15,49 @@ python script.py → terminal          ─────────────�
 app.py                   — starts the server, opens a browser
 package.json             — Electron manifest; `npm start` runs desktop/launch.js
 desktop/launch.js        — re-spawns Electron with a clean env, then main.js
-desktop/main.js          — spawns the Python backend on a free port, opens the window
+desktop/main.js          — starts the backend on a free port, opens the window
 ui/index.html            — the four pages
 ui/app.css               — dark theme
-ui/app.js                — all UI behaviour, no framework
-autoeditor/server.py     — stdlib HTTP backend, JSON API + media streaming
-autoeditor/project.py    — VideoScript ⇄ the JSON the UI exchanges
-autoeditor/script_writer.py — VideoScript → markdown (Export and Save As)
-autoeditor/sysmon.py     — CPU/GPU sampling for the render page's graph
-autoeditor/timecode.py   — `1:02:03.5` ⇄ seconds
+ui/js/                   — ES modules, one per concern
 ```
+
+The backend is described in [architecture.md](architecture.md); this file is about the
+front end and the API between them.
+
+## The front end, module by module
+
+`index.html` loads `js/main.js` as a module, so every file below keeps its own scope.
+
+| Module | Owns |
+|---|---|
+| `util.js` | `$`, `el`, formatting, `toast`, the fetch wrappers |
+| `state.js` | the project being edited, the probe cache, the derived durations |
+| `pages.js` | which page is showing |
+| `settings.js` | the settings form, the output path, encoders, opening and saving |
+| `balance.js` | the levelling job and its panel |
+| `picker.js` | the browse modal: adding clips, relinking, `choosePath` |
+| `views.js` | what every page renders in common, and removal with undo |
+| `clips.js` | the Clips page table |
+| `rail.js` | the Edit page's running order |
+| `preview.js` | the video element: playback, seeking, preview gain |
+| `zoom.js` | the visible window of the scrubber, filmstrip, overview |
+| `regions.js` | region bands, the region table, scrubber gestures |
+| `editor.js` | selecting a clip, its joins and its audio |
+| `render.js` | the Render page: stages, log, utilisation, progress |
+| `main.js` | imports everything, then starts it |
+
+Two rules keep that honest. A module owns its own state and exposes functions to change it —
+`preview.js` grew `resetSeekTarget()` for exactly this reason, because ES module imports are
+const bindings and another module was assigning to one. And what a module exports is what
+another module needs, plus the operations that make sense to ask of it; nothing is exported
+only to be seen.
+
+`main.js` puts the namespaces on `window.app`. That is a deliberate seam: the app runs in a
+window with no devtools and no address bar, so it is otherwise impossible to look at while
+running, and impossible for a test to drive. `window.app.modules` holds the namespace
+objects, whose bindings stay live; the flattened copy beside them is a snapshot, which is
+right for functions and wrong for anything that changes. Tests opt into globals with
+`Object.assign(window, window.app)` — the app itself never does.
 
 ## Pages
 
@@ -68,7 +101,7 @@ All JSON except the two media routes. Bound to `127.0.0.1` only.
 | `POST /api/balance-audio` | Start measuring |
 | `POST /api/balance-audio/cancel` | Stop the running measurement |
 | `POST /api/save-template` | Save As: write the project into `templates/` (or a given path) |
-| `POST /api/reveal` | Open the output folder |
+| `POST /api/reveal` | Open the output folder (browser fallback; see below) |
 
 `save-template` writes the project through `to_markdown`. A bare name is sanitised and
 lands in `templates/`; a name with a separator in it is honoured as a path, which is what
@@ -199,6 +232,17 @@ explanatory paragraphs (the labels carry it), and CSS multi-column rather than g
 rows align to the tallest panel in the row and leave dead space under the short ones;
 columns pack them against each other. Only genuinely dynamic notes remain — the encoder
 availability line, the output-path check, the levelling result.
+
+## Revealing the output
+
+`shell.showItemInFolder` runs in the Electron shell, reached through the one bridge in
+`desktop/preload.js`. It has to: Windows only lets the *foreground* process pass focus on,
+and that is the shell, not the backend it spawned — a folder opened from Python lands behind
+the app window, which is exactly what it did.
+
+`window.desktop` is absent in a browser, so the UI falls back to `POST /api/reveal` and
+`library.reveal`, which uses `explorer /select,<file>` to open the folder with the file
+already highlighted.
 
 ## Removing clips
 

@@ -1,198 +1,27 @@
-"""Single-pass ffmpeg render: every clip is an input to one filter_complex."""
+"""Building the one filter_complex that is the whole edit.
 
-import json
-import subprocess
-import threading
-from dataclasses import dataclass, replace
-from pathlib import Path
+Every clip is an input to a single ffmpeg call and this is what wires them
+together: dead space dropped in-graph, sizes and rates normalised, crossfade
+runs blended, groups concatenated, levels and fades applied. Nothing here runs
+ffmpeg -- it only writes the graph, which makes it the piece worth reading when
+an edit comes out wrong.
+"""
 
-from .loudness import balance_gain, measure_loudness
-from .silence import compute_keep_intervals
-from .timeline import Join, Region, TimelineClip, VideoScript
+from .probe import ClipInfo
+from .timeline import Join, TimelineClip, VideoScript, expand_regions
 
+# -1 dBFS, as linear amplitude, which is what alimiter wants.
+OUTPUT_CEILING = 10 ** (-1.0 / 20)
 
-@dataclass
-class ClipInfo:
-    path: Path
-    duration: float
-    width: int
-    height: int
-    fps: float
-    has_audio: bool
-    vcodec: str = ""
-    acodec: str = ""
-    pix_fmt: str = ""
-    # Levelling trim resolved for this clip, 0 when balancing is off.
-    balance_db: float = 0.0
-    # Loud regions to keep; None means the clip plays in full.
-    keep_intervals: list[tuple[float, float]] | None = None
-
-    @property
-    def effective_duration(self) -> float:
-        """Output duration after dead-space trimming."""
-        if self.keep_intervals is None:
-            return self.duration
-        return sum(b - a for a, b in self.keep_intervals)
+# Equal power, the curve an editor expects of an audio crossfade. Two unrelated
+# signals ramped linearly sum to about -3 dB where they meet, so a long linear
+# crossfade audibly sags in the middle; a quarter-sine pair holds the level flat
+# because sin^2 + cos^2 = 1. Inaudible across a 0.3 s join, obvious across ten
+# seconds -- which is the length an `audio overlap` join tends to be.
+CROSSFADE_CURVE = "qsin"
 
 
-def probe_clip(path: Path) -> ClipInfo:
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet",
-            "-print_format", "json",
-            "-show_streams", "-show_format",
-            str(path),
-        ],
-        capture_output=True, text=True, check=True,
-    )
-    data = json.loads(result.stdout)
-
-    video_stream = next(
-        (s for s in data["streams"] if s["codec_type"] == "video"), None
-    )
-    if video_stream is None:
-        raise ValueError(f"No video stream in {path}")
-
-    audio_streams = [s for s in data["streams"] if s["codec_type"] == "audio"]
-
-    fps_num, fps_den = video_stream.get("r_frame_rate", "30/1").split("/")
-    fps = int(fps_num) / int(fps_den) if int(fps_den) else 0.0
-
-    return ClipInfo(
-        path=path,
-        duration=float(data["format"].get("duration", 0)),
-        width=int(video_stream["width"]),
-        height=int(video_stream["height"]),
-        fps=fps,
-        has_audio=bool(audio_streams),
-        vcodec=video_stream.get("codec_name", ""),
-        acodec=audio_streams[0].get("codec_name", "") if audio_streams else "",
-        pix_fmt=video_stream.get("pix_fmt", ""),
-    )
-
-
-def _cpu(quality: int) -> list[str]:
-    return ["-preset", "fast", "-crf", str(quality)]
-
-
-def _nvenc(quality: int) -> list[str]:
-    # The rate control has to be named. Left to its default, nvenc honours -cq
-    # only loosely and writes roughly 2.4x the size of libx264 for the same
-    # wall time -- measured, and the reason this is not just ["-cq", n].
-    return ["-preset", "p4", "-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
-
-
-def _amf(quality: int) -> list[str]:
-    return ["-quality", "balanced", "-rc", "cqp", "-qp_i", str(quality), "-qp_p", str(quality)]
-
-
-def _qsv(quality: int) -> list[str]:
-    return ["-preset", "fast", "-global_quality", str(quality)]
-
-
-# Default quality per encoder, then how that number is spelled for it. The
-# scale is CRF-like throughout: lower is better and bigger.
-_ENCODER_PROFILES: dict[str, tuple[int, object]] = {
-    "libx264":    (18, _cpu),
-    "libx265":    (22, _cpu),
-    "h264_nvenc": (23, _nvenc),
-    "hevc_nvenc": (25, _nvenc),
-    "av1_nvenc":  (25, _nvenc),
-    "h264_amf":   (22, _amf),
-    "hevc_amf":   (24, _amf),
-    "h264_qsv":   (22, _qsv),
-    "hevc_qsv":   (24, _qsv),
-}
-
-
-def encoder_default_quality(encoder: str) -> int:
-    return _ENCODER_PROFILES.get(encoder, (18, _cpu))[0]
-
-
-def _encode_args(encoder: str, quality: float | None = None) -> list[str]:
-    default, build = _ENCODER_PROFILES.get(encoder, (18, _cpu))
-    return ["-c:v", encoder] + build(int(default if quality is None else quality))
-
-
-_ENCODER_SUPPORT: dict[str, bool] = {}
-
-
-def encoder_available(encoder: str) -> bool:
-    """Whether this machine can actually encode with it, cached per process.
-
-    A hardware encoder can be compiled into ffmpeg and still fail to open --
-    the dropdown offered AMD and Intel encoders on a machine with neither,
-    which only came out as a failed render.
-    """
-    if encoder not in _ENCODER_SUPPORT:
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-hide_banner", "-v", "error",
-                    "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=0.2",
-                    *_encode_args(encoder), "-f", "null", "-",
-                ],
-                capture_output=True, timeout=30,
-            )
-            _ENCODER_SUPPORT[encoder] = result.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            _ENCODER_SUPPORT[encoder] = False
-    return _ENCODER_SUPPORT[encoder]
-
-
-def expand_regions(clips: list[TimelineClip]) -> list[TimelineClip]:
-    """Split any clip whose regions blend into one clip per region.
-
-    Regions joined by plain cuts stay together and are dropped in-graph by
-    keep_intervals, which needs only one ffmpeg input. A region that crossfades
-    or fades into the one before it cannot be expressed that way, so the clip
-    becomes several clips and the ordinary join machinery takes over.
-    """
-    out: list[TimelineClip] = []
-    for clip in clips:
-        if not clip.needs_region_split():
-            out.append(clip)
-            continue
-        for i, region in enumerate(clip.regions or []):
-            out.append(replace(
-                clip,
-                regions=[replace(region, join=Join.CUT, join_duration=0.0)],
-                join=clip.join if i == 0 else region.join,
-                join_duration=clip.join_duration if i == 0 else region.join_duration,
-                balance_db=clip.balance_db,
-                audio_overlap=clip.audio_overlap if i == 0 else None,
-                audio_lead=clip.audio_lead if i == 0 else 0.0,
-                label=clip.label if i == 0 else f"{clip.label} ({i + 1})",
-            ))
-    return out
-
-
-def _clamp(intervals, duration: float) -> list[tuple[float, float]]:
-    """Trim intervals to the clip's real length, dropping any that fall outside."""
-    out = []
-    for a, b in intervals:
-        a, b = max(0.0, a), min(duration, b)
-        if b - a > 1e-6:
-            out.append((a, b))
-    return out
-
-
-def _intersect(left, right) -> list[tuple[float, float]]:
-    """Overlapping portions of two sorted interval lists."""
-    out, i, j = [], 0, 0
-    while i < len(left) and j < len(right):
-        a = max(left[i][0], right[j][0])
-        b = min(left[i][1], right[j][1])
-        if b - a > 1e-6:
-            out.append((a, b))
-        if left[i][1] < right[j][1]:
-            i += 1
-        else:
-            j += 1
-    return out
-
-
-def _split_into_groups(clips: list[TimelineClip]) -> list[list[int]]:
+def split_into_groups(clips: list[TimelineClip]) -> list[list[int]]:
     """Group clips into runs joined by crossfade; cut and fade joins end a run."""
     groups: list[list[int]] = []
     current: list[int] = []
@@ -209,7 +38,7 @@ def _split_into_groups(clips: list[TimelineClip]) -> list[list[int]]:
     return groups
 
 
-def _group_duration(
+def group_duration(
     indices: list[int], infos: list[ClipInfo], clips: list[TimelineClip]
 ) -> float:
     """Output duration of a group, accounting for xfade overlap."""
@@ -219,13 +48,13 @@ def _group_duration(
     return total
 
 
-def _total_duration(
+def total_duration(
     groups: list[list[int]], infos: list[ClipInfo], clips: list[TimelineClip]
 ) -> float:
-    return sum(_group_duration(g, infos, clips) for g in groups)
+    return sum(group_duration(g, infos, clips) for g in groups)
 
 
-def _video_offsets(
+def video_offsets(
     infos: list[ClipInfo], clips: list[TimelineClip], groups: list[list[int]]
 ) -> list[float]:
     """Output time each clip's picture starts at.
@@ -241,16 +70,16 @@ def _video_offsets(
         for k in range(1, len(indices)):
             acc += infos[indices[k - 1]].effective_duration - clips[indices[k]].join_duration
             offsets[indices[k]] = acc
-        base += _group_duration(indices, infos, clips)
+        base += group_duration(indices, infos, clips)
     return offsets
 
 
-def _uses_audio_offsets(clips: list[TimelineClip]) -> bool:
+def uses_audio_offsets(clips: list[TimelineClip]) -> bool:
     """True when any join asks its sound to depart from its picture."""
     return any(not clip.audio_follows_picture() for clip in clips[1:])
 
 
-def _audio_layout(
+def audio_layout(
     infos: list[ClipInfo], clips: list[TimelineClip], groups: list[list[int]]
 ) -> list[dict]:
     """Where each clip's audio sits, what it plays, and how its edges blend.
@@ -267,20 +96,27 @@ def _audio_layout(
     With no lead and a blend matching the picture, both are zero and every clip
     lands exactly where the concat/acrossfade chain would have put it.
     """
-    starts = _video_offsets(infos, clips, groups)
+    starts = video_offsets(infos, clips, groups)
     count = len(clips)
     ranges = [info.keep_intervals or [(0.0, info.duration)] for info in infos]
 
     head = [0.0] * count
     tail = [0.0] * count
-    blend = [0.0] * (count + 1)
+    # Fades are tracked per side because a shortfall on one end of a join does
+    # not imply one on the other.
+    fade_in = [0.0] * (count + 1)
+    fade_out = [0.0] * (count + 1)
     short = [None] * count   # per join: (asked, granted) when the source ran out
 
     for i in range(1, count):
-        span = clips[i].join_duration
-        half = (clips[i].audio_blend - span) / 2
-        want_head = clips[i].audio_lead + half
-        want_tail = half - clips[i].audio_lead
+        overlap_ahead = clips[i].overlap
+        span = 0.0 if overlap_ahead else clips[i].join_duration
+        blend_len = clips[i].blend_length()
+        half = (blend_len - span) / 2
+        # An `audio overlap` join's whole length is the overlap: the sound
+        # starts that far ahead of its own picture, which the picture gave up.
+        want_head = overlap_ahead + clips[i].audio_lead + (0.0 if overlap_ahead else half)
+        want_tail = 0.0 if overlap_ahead else (half - clips[i].audio_lead)
 
         # Only what the source actually has either side, and never so much
         # that a clip is asked to give up its own middle.
@@ -290,14 +126,18 @@ def _audio_layout(
         tail[i - 1] = min(
             max(want_tail, -0.45 * infos[i - 1].effective_duration), room_tail
         )
-        blend[i] = max(0.0, span + head[i] + tail[i - 1])
+        overlap = max(0.0, span + head[i] + tail[i - 1])
+        # Both sides ramp across the whole overlap unless asked for less, so an
+        # `audio overlap` join arrives over its full length rather than snapping
+        # in at the front.
+        fade_in[i] = fade_out[i] = min(blend_len, overlap)
 
         # An overlap is paid for out of source either side of the cut. A clip
         # used to its last frame has none to give, and the ask quietly shrinks
         # -- so say so rather than letting the edit look broken.
         asked = span + want_head + want_tail
-        if asked - blend[i] > 0.01:
-            short[i] = (asked, blend[i])
+        if asked - overlap > 0.01:
+            short[i] = (asked, overlap)
 
     layout = []
     for i, info in enumerate(infos):
@@ -314,8 +154,8 @@ def _audio_layout(
             "start": max(0.0, starts[i] - head[i]),
             "intervals": kept,
             "duration": sum(b - a for a, b in kept),
-            "fade_in": blend[i],
-            "fade_out": blend[i + 1],
+            "fade_in": fade_in[i],
+            "fade_out": fade_out[i + 1],
         })
     return layout
 
@@ -323,9 +163,9 @@ def _audio_layout(
 def audio_notes(script: VideoScript, infos: list[ClipInfo]) -> list[str]:
     """Joins whose audio overlap the sources could not fully pay for."""
     clips = expand_regions(script.clips)
-    if not _uses_audio_offsets(clips):
+    if not uses_audio_offsets(clips):
         return []
-    layout = _audio_layout(infos, clips, _split_into_groups(clips))
+    layout = audio_layout(infos, clips, split_into_groups(clips))
     notes = []
     for clip, item in zip(clips, layout):
         if not item["shortfall"]:
@@ -375,7 +215,7 @@ def _place_audio(
     it pulls each source only when the timeline reaches it, and this mix is
     strictly more machinery for the same result when nothing is offset.
     """
-    layout = _audio_layout(infos, clips, groups)
+    layout = audio_layout(infos, clips, groups)
     parts: list[str] = []
     placed: list[str] = []
 
@@ -394,10 +234,15 @@ def _place_audio(
             chain.append(f"volume={gain:g}dB")
         chain.append(_pin(item["duration"]).rstrip(","))
         if item["fade_in"] > 0:
-            chain.append(f"afade=t=in:st=0:d={item['fade_in']:.3f}")
+            chain.append(
+                f"afade=t=in:st=0:d={item['fade_in']:.3f}:curve={CROSSFADE_CURVE}"
+            )
         if item["fade_out"] > 0:
             start = max(0.0, item["duration"] - item["fade_out"])
-            chain.append(f"afade=t=out:st={start:.3f}:d={item['fade_out']:.3f}")
+            chain.append(
+                f"afade=t=out:st={start:.3f}:d={item['fade_out']:.3f}"
+                f":curve={CROSSFADE_CURVE}"
+            )
         chain.append("aformat=sample_fmts=fltp:channel_layouts=stereo")
         # adelay works in whole milliseconds -- a fifteenth of a frame at 60fps.
         offset = int(round(item["start"] * 1000))
@@ -438,7 +283,7 @@ def _pin(duration: float) -> str:
     return f"apad,atrim=end={duration:.6f},asetpts=PTS-STARTPTS,"
 
 
-def _build_filter_complex(
+def build_filter_complex(
     infos: list[ClipInfo],
     clips: list[TimelineClip],
     groups: list[list[int]],
@@ -453,7 +298,7 @@ def _build_filter_complex(
     parts: list[str] = []
     # When a join wants its sound off its picture, audio is placed and mixed
     # instead of chained; the per-clip audio normalising below is then skipped.
-    placed = _uses_audio_offsets(clips)
+    placed = uses_audio_offsets(clips)
 
     # Per-clip: drop dead space in-graph, then normalise size, rate and format.
     for i, info in enumerate(infos):
@@ -550,7 +395,8 @@ def _build_filter_complex(
                 if not placed:
                     parts.append(
                         f"{a_in1}[an{nxt}]"
-                        f"acrossfade=d={blend}:c1=tri:c2=tri"
+                        f"acrossfade=d={blend}"
+                        f":c1={CROSSFADE_CURVE}:c2={CROSSFADE_CURVE}"
                         f"{a_out}"
                     )
 
@@ -571,7 +417,7 @@ def _build_filter_complex(
             nxt_first = groups[g + 1][0]
             if clips[nxt_first].join is Join.FADE:
                 down = clips[nxt_first].join_duration
-                start = max(0.0, _group_duration(indices, infos, clips) - down)
+                start = max(0.0, group_duration(indices, infos, clips) - down)
                 v_chain.append(f"fade=t=out:st={start:.3f}:d={down}")
                 a_chain.append(f"afade=t=out:st={start:.3f}:d={down}")
 
@@ -585,7 +431,7 @@ def _build_filter_complex(
         group_v.append(v_label)
         group_a.append(a_label)
 
-    total = _total_duration(groups, infos, clips)
+    total = total_duration(groups, infos, clips)
 
     if placed:
         # Video concats on its own; audio is mixed from its placed segments.
@@ -632,203 +478,3 @@ def _build_filter_complex(
     return ";".join(parts), v_pre, a_pre
 
 
-def format_time(seconds: float) -> str:
-    s = int(seconds)
-    h, rem = divmod(s, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _run_with_progress(
-    cmd: list[str], total_dur: float, on_progress=None, on_start=None, on_stderr=None
-) -> None:
-    """Run ffmpeg, reporting progress to a callback or the console."""
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    if on_start:
-        on_start(proc)
-
-    # Drain stderr concurrently; ffmpeg can fill the pipe before stdout progress starts.
-    stderr_lines: list[str] = []
-
-    def _drain_stderr() -> None:
-        for line in proc.stderr:  # type: ignore[union-attr]
-            stderr_lines.append(line)
-            if on_stderr:
-                on_stderr(line.rstrip())
-
-    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    stderr_thread.start()
-
-    out_time_us = 0
-    speed = ""
-
-    for raw in proc.stdout:  # type: ignore[union-attr]
-        line = raw.strip()
-        if line.startswith("out_time_us="):
-            try:
-                out_time_us = int(line.split("=", 1)[1])
-            except ValueError:
-                pass
-        elif line.startswith("speed="):
-            speed = line.split("=", 1)[1].strip()
-        elif line.startswith("progress="):
-            elapsed = out_time_us / 1_000_000
-            pct = min(100.0, (elapsed / total_dur) * 100) if total_dur > 0 else 0
-            if on_progress:
-                on_progress(elapsed, total_dur, pct, speed)
-                continue
-            timing = f"{format_time(elapsed)} / {format_time(total_dur)} ({pct:.0f}%)"
-            speed_str = f"  @ {speed}" if speed not in ("", "N/A") else ""
-            print(f"\r  Rendering: {timing}{speed_str}   ", end="", flush=True)
-
-    proc.wait()
-    stderr_thread.join()
-    if not on_progress:
-        print()  # move past the in-place progress line
-
-    if proc.returncode != 0:
-        raise subprocess.CalledProcessError(
-            proc.returncode, cmd, stderr="".join(stderr_lines)
-        )
-
-
-def probe_script(script: VideoScript, *, verbose: bool = True, on_step=None) -> list[ClipInfo]:
-    """Probe every clip, running silence detection where the script asks for it.
-
-    Returns one ClipInfo per clip of `expand_regions(script.clips)`, which is
-    what render_script renders -- use that same list if you need to pair them.
-    """
-    def log(msg: str) -> None:
-        if verbose:
-            print(msg)
-
-    infos: list[ClipInfo] = []
-    # Keyed by source *and* the spans analysed: the same file cut two ways is
-    # two different questions, and the answer to one is wrong for the other.
-    cache: dict[tuple, list[tuple[float, float]] | None] = {}
-    todo = expand_regions(script.clips)
-
-    def step(done: int, message: str) -> None:
-        if on_step:
-            on_step(done, len(todo), message)
-
-    for index, clip in enumerate(todo):
-        step(index, f"reading {clip.path.name}")
-        info = probe_clip(clip.path)
-        keep = (
-            _clamp([r.as_tuple() for r in clip.regions], info.duration)
-            if clip.regions else None
-        )
-
-        if clip.trim_silence and info.has_audio:
-            # Only the material the edit keeps is worth analysing -- see
-            # compute_keep_intervals for why that is also more accurate.
-            spans = keep or [(0.0, info.duration)]
-            key = (clip.path, tuple(spans))
-            if key not in cache:
-                span_total = sum(b - a for a, b in spans)
-                scope = (
-                    f"{format_time(span_total)} of {format_time(info.duration)}"
-                    if keep else format_time(info.duration)
-                )
-                log(f"    analysing silence: {clip.path.name} ({scope})")
-                step(index, f"detecting silence in {clip.path.name}")
-                cache[key] = compute_keep_intervals(
-                    clip.path, info.duration, script.silence, within=spans
-                )
-            loud = cache[key]
-            if loud:
-                keep = _intersect(keep, loud) if keep else loud
-
-        info.keep_intervals = keep or None
-
-        if script.balance.enabled and info.has_audio:
-            # A level written into the script is trusted; anything else is
-            # measured now, over the spans the edit actually keeps.
-            if clip.balance_db is not None:
-                info.balance_db = clip.balance_db
-            else:
-                spans = info.keep_intervals or None
-                key = ("balance", clip.path, tuple(spans) if spans else None)
-                if key not in cache:
-                    log(f"    measuring loudness: {clip.path.name}")
-                    step(index, f"measuring loudness of {clip.path.name}")
-                    measured = measure_loudness(clip.path, spans)
-                    cache[key] = (
-                        balance_gain(measured, script.balance.target_lufs)
-                        if measured is not None and measured.usable else 0.0
-                    )
-                info.balance_db = cache[key]
-                if info.balance_db:
-                    log(f"      levelled {info.balance_db:+g} dB")
-
-        if info.keep_intervals:
-            removed = info.duration - info.effective_duration
-            log(
-                f"    {clip.path.name}: {len(info.keep_intervals)} segment(s) kept, "
-                f"{format_time(removed)} trimmed "
-                f"({format_time(info.duration)} -> "
-                f"{format_time(info.effective_duration)})"
-            )
-
-        infos.append(info)
-        step(index + 1, f"read {clip.path.name}")
-
-    return infos
-
-
-def render_script(
-    script: VideoScript,
-    infos: list[ClipInfo],
-    *,
-    verbose: bool = True,
-    on_progress=None,
-    on_start=None,
-    on_stderr=None,
-    on_stage=None,
-) -> Path:
-    """Render the script in one ffmpeg pass, writing no intermediate files."""
-    output_path = script.output.file
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    clips = expand_regions(script.clips)
-    groups = _split_into_groups(clips)
-
-    if verbose and not on_progress:
-        print(f"  Building filter graph ({len(clips)} clips, {len(groups)} group(s))...")
-    if on_stage:
-        on_stage("graph", f"{len(clips)} clips in {len(groups)} group(s)")
-
-    filter_complex, v_out, a_out = _build_filter_complex(infos, clips, groups, script)
-
-    # -progress and -nostats are global options and must precede all -i flags.
-    cmd = ["ffmpeg", "-hide_banner", "-y", "-progress", "pipe:1", "-nostats"]
-    for clip in clips:
-        cmd += ["-i", str(clip.path)]
-
-    cmd += [
-        "-filter_complex", filter_complex,
-        "-map", f"[{v_out}]",
-        "-map", f"[{a_out}]",
-        *_encode_args(script.output.encoder, script.output.quality),
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-    ]
-    # faststart moves the index to the front so a file streams before it has
-    # finished downloading. Only mp4-family containers have one to move.
-    if output_path.suffix.lower() in (".mp4", ".m4v", ".mov"):
-        cmd += ["-movflags", "+faststart"]
-    cmd += [str(output_path)]
-
-    if on_stage:
-        on_stage("encode", f"{script.output.encoder} -> {output_path.name}")
-
-    if verbose or on_progress:
-        _run_with_progress(
-            cmd, _total_duration(groups, infos, clips), on_progress, on_start, on_stderr
-        )
-    else:
-        subprocess.run(cmd, check=True, capture_output=True)
-
-    return output_path

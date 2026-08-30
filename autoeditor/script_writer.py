@@ -39,10 +39,10 @@ def _item_options(clip, defaults: Defaults) -> list[str]:
     if clip.balance_db is not None:
         options.append(f"balance {clip.balance_db:+g} dB")
 
-    if clip.audio_overlap != defaults.audio_overlap:
+    if clip.audio_blend != defaults.audio_blend:
         options.append(
-            "audio overlap auto" if clip.audio_overlap is None
-            else f"audio overlap {_fmt(clip.audio_overlap)}"
+            "audio blend auto" if clip.audio_blend is None
+            else f"audio blend {_fmt(clip.audio_blend)}"
         )
     if abs(clip.audio_lead - defaults.audio_lead) > 1e-9:
         options.append(f"audio lead {_fmt(clip.audio_lead)}")
@@ -77,6 +77,7 @@ def to_markdown(script: VideoScript, *, notes: str = "") -> str:
         f"- join: {defaults.join.value}",
         f"- crossfade: {_fmt(defaults.crossfade)}",
         f"- fade: {_fmt(defaults.fade)}",
+        f"- audio overlap: {_fmt(defaults.audio_overlap)}",
         f"- fade in: {_fmt(defaults.fade_in)}",
         f"- fade out: {_fmt(defaults.fade_out)}",
         f"- trim silence: {'yes' if defaults.trim_silence else 'no'}",
@@ -93,10 +94,10 @@ def to_markdown(script: VideoScript, *, notes: str = "") -> str:
         "",
     ]
 
-    if defaults.audio_overlap is not None:
+    if defaults.audio_blend is not None:
         lines.insert(
             lines.index(f"- audio lead: {_fmt(defaults.audio_lead)}"),
-            f"- audio overlap: {_fmt(defaults.audio_overlap)}",
+            f"- audio blend: {_fmt(defaults.audio_blend)}",
         )
 
     for i, clip in enumerate(script.clips, 1):

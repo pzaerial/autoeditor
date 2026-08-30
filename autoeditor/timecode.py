@@ -23,3 +23,10 @@ def format_timecode(seconds: float) -> str:
     minutes, secs = divmod(rem, 60)
     text = f"{int(hours)}:{int(minutes):02d}:{secs:06.3f}" if hours else f"{int(minutes)}:{secs:06.3f}"
     return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def format_time(seconds: float) -> str:
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
