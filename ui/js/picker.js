@@ -263,7 +263,6 @@ $("add-selected").addEventListener("click", async () => {
       join_duration: joinDuration(d.join, d),
       trim_silence: d.trim_silence,
       audio_gain_db: 0,
-      balance_db: null,
       audio_blend: d.audio_blend === undefined ? null : d.audio_blend,
       audio_lead: d.audio_lead || 0,
       regions: [],

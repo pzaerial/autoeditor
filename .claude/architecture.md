@@ -6,6 +6,7 @@ app.py                   — UI entry point: starts the server, opens a browser
 myvideo.md               — the edit: paths, order, format (see script-format.md)
 
 autoeditor/              the engine, and the local server the app talks to
+    schema.py            — every script setting, declared once
     timecode.py          — `1:02:03.5` ⇄ seconds, and durations for display
     timeline.py          — data model: VideoScript, TimelineClip, Join, settings
     script_parser.py     — parse_script() → VideoScript from a markdown file
@@ -59,20 +60,39 @@ Each `TimelineClip` carries the `Join` describing how it attaches to the clip **
 which levelling now does by measurement; keeping both would have meant two ways to set the
 same thing, applied in sequence. Its fades were join settings all along.
 
+## schema.py
+Every setting a script can carry: its canonical spelling, its aliases, which object and
+field it fills, how to read the value, and a line of help. One `Setting` per line.
+
+The parser reads through it, the writer emits through it, and `tools/gen_reference.py`
+generates the reference tables in [script-format.md](script-format.md) from it. Before,
+each setting was written out three times — a key table, an apply function that knew its
+type, and a line in the writer — so adding one meant three edits, and the three could
+disagree without anything noticing. They did: the `join:` error still listed "cut,
+crossfade or fade" a release after `audio overlap` was added.
+
+Lookup is **global**, not per section. Sections group settings for the reader; the parser
+understands a setting wherever it appears. That is what lets a file written against an
+older layout open unchanged, and it removed the routing special-case that used to carry
+`fade in` from `## Output` across to the joins.
+
+`RETIRED` names settings that no longer exist, so a script carrying one is told what
+replaced it instead of failing on an unknown key. `ITEM_OPTIONS` does the same job for
+timeline items — it is what the "unknown timeline option" error lists, so that message
+cannot fall behind the parser again.
+
 ## script_parser.py
 `parse_script(path, strict=True)` → `VideoScript`, raising `ScriptError` (which carries a line number) on any problem. `strict=False` (used by the app) keeps missing files as `missing=True` placeholders and skips the output-name check, so a template from another machine still loads.
 
 Only two line shapes are meaningful: `#` headings open sections, and list items carry values. Everything else — prose, blockquotes, fenced blocks — is skipped, so scripts double as episode notes. Unknown sections warn; unknown keys and options are hard errors listing the valid ones.
 
-`fade in` and `fade out` are join settings in `## Defaults`, but were once written under
-`## Output` and later under `## Global Edits`. `_JOIN_FROM_OUTPUT` routes the first spelling
-across and `_SECTION_ALIASES` maps the second onto `## Defaults`, so no existing script
-needs rewriting. `_RETIRED_KEYS` names settings that no longer exist — `audio adjust` —
-so a script still carrying one is told what replaced it rather than failing on an unknown
-key.
+Older layouts open unchanged because section headings are advisory: `## Defaults`,
+`## Global Edits` and `## Silence` are all accepted, and a setting is understood wherever
+it sits. Saving from the app rewrites the file in the canonical arrangement.
 
-Section aliases live in `_SECTION_ALIASES`; key aliases in `_OUTPUT_KEYS` / `_AUTOEDIT_KEYS` /
-`_SILENCE_KEYS` / `_DEFAULT_KEYS`. Keys are normalised by `_norm_key` so `Fade In`, `fade_in` and `**fade-in**` all match.
+Sections and settings both come from [schema.py](#schemapy); `_read` is the only place that
+knows how to turn a written value into a stored one. Keys are normalised by `_norm_key`, so
+`Fade In`, `fade_in` and `**fade-in**` all match.
 
 `volume -3` and `balance +8` are matched against the raw option text, before `_norm_key`
 runs — that normaliser turns a minus sign into a space, so a negative gain matched

@@ -1,5 +1,4 @@
 import { selectClip } from "./editor.js";
-import { balanceDb } from "./preview.js";
 import { audioFollowsPicture, audioJoinLabel, estimateLabel, joinLabel, keptDuration, state } from "./state.js";
 import { $, el, fmt } from "./util.js";
 import { makeReorderable, refreshAll, removeClip } from "./views.js";
@@ -24,7 +23,6 @@ export function renderClipList() {
     if (clip.regions && clip.regions.length) bits.push(`${clip.regions.length} region(s)`);
     if (clip.trim_silence) bits.push("silence");
     if (clip.audio_gain_db) bits.push(`${clip.audio_gain_db > 0 ? "+" : ""}${clip.audio_gain_db}dB`);
-    if (balanceDb(clip)) bits.push(`lvl ${balanceDb(clip) > 0 ? "+" : ""}${balanceDb(clip)}`);
     if (i > 0 && !audioFollowsPicture(clip)) bits.push(audioJoinLabel(clip));
     if (clip.missing) bits.push("missing");
     body.appendChild(el("div", "sub", bits.join(" · ")));

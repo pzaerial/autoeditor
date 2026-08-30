@@ -1,10 +1,12 @@
 """Parse a markdown video script into a VideoScript."""
 
+import difflib
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import schema
 from .timecode import format_timecode, parse_timecode
 from .timeline import (
     VIDEO_EXTENSIONS,
@@ -32,35 +34,6 @@ _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 _RESOLUTION_RE = re.compile(r"^\d+\s*[x\u00d7]\s*\d+$")
 _OPTION_SPLIT_RE = re.compile(r"\s(?:--|\u2014|\u2013|\|)\s")
-
-_SECTION_ALIASES = {
-    "output": "output",
-    "output settings": "output",
-    "settings": "output",
-    "defaults": "defaults",
-    "default": "defaults",
-    "joins": "defaults",
-    "join": "defaults",
-    # The fades that used to live here are join settings; the section name is
-    # kept so scripts written against it still open.
-    "global edits": "defaults",
-    "global": "defaults",
-    "globals": "defaults",
-    "master": "defaults",
-    "auto editor": "autoedit",
-    "auto edit": "autoedit",
-    "passes": "autoedit",
-    "silence": "silence",
-    "trim silence": "silence",
-    "dead space": "silence",
-    "dead space removal": "silence",
-    "assets": "assets",
-    "files": "assets",
-    "sources": "assets",
-    "timeline": "timeline",
-    "sequence": "timeline",
-    "order": "timeline",
-}
 
 _TRUTHY = {"true", "yes", "on", "1", "y"}
 _FALSY = {"false", "no", "off", "0", "n"}
@@ -121,9 +94,15 @@ def _parse_number(value: str, key: str, line: int) -> float:
         raise ScriptError(f"{key}: expected a number, got {value!r}", line) from None
 
 
-def _unknown_key(key: str, valid: dict, section: str, line: int) -> ScriptError:
-    options = ", ".join(sorted(valid))
-    return ScriptError(f"unknown {section} setting {key!r}. Valid: {options}", line)
+def _unknown_setting(key: str, line: int) -> ScriptError:
+    known = sorted({setting.key for setting in schema.LOOKUP.values()})
+    # A misspelling is far more likely than a genuinely unknown setting, and
+    # the whole list is long enough to be worth skipping past.
+    near = difflib.get_close_matches(key, sorted(schema.LOOKUP), n=1, cutoff=0.7)
+    hint = f" Did you mean `{near[0]}`?" if near else ""
+    return ScriptError(
+        f"unknown setting {key!r}.{hint} Valid: {', '.join(known)}", line
+    )
 
 
 def _resolve_path(raw: str, base: Path) -> Path:
@@ -199,8 +178,9 @@ _JOIN_OPTION_RE = re.compile(
 )
 # `volume +3 dB`, `gain -2`, `audio 1.5` -- a straight level trim for one clip.
 _GAIN_OPTION_RE = re.compile(r"^(volume|gain|audio)\s+([+-]?[\d.]+\s*(?:db)?)$")
-# `balance +8.2 dB` -- what levelling measured, written back so a render need
-# not measure it again.
+# `balance +8.2 dB` -- how levelling used to record what it measured, when that
+# was a second number alongside `volume`. Now there is one, and this adds into
+# it, so a script written against the old pair still renders the same.
 _BALANCE_OPTION_RE = re.compile(r"^balance\s+([+-]?[\d.]+\s*(?:db)?)$")
 # `audio overlap 2`, `audio lead -1.5` -- where this join's sound sits.
 _AUDIO_EDIT_RE = re.compile(
@@ -220,9 +200,11 @@ class ItemOptions:
     duration: float | None = None
     trim: bool | None = None
     gain_db: float | None = None
+    # A legacy `balance` option, kept apart from `volume` until both have been
+    # read so the two spellings can appear in either order and still sum.
+    legacy_balance_db: float = 0.0
     audio_blend: float | None = None
     audio_lead: float | None = None
-    balance_db: float | None = None
     # `audio blend auto` asks for None, which a plain None cannot express.
     audio_blend_auto: bool = False
     regions: list[Region] = field(default_factory=list)
@@ -273,7 +255,9 @@ def _parse_options(text: str, line: int) -> ItemOptions:
 
         levelled = _BALANCE_OPTION_RE.match(raw_option.strip().lower())
         if levelled:
-            opts.balance_db = _parse_number(levelled.group(1), "balance", line)
+            opts.legacy_balance_db += _parse_number(
+                levelled.group(1), "balance", line
+            )
             continue
 
         gain = _GAIN_OPTION_RE.match(raw_option.strip().lower())
@@ -302,11 +286,8 @@ def _parse_options(text: str, line: int) -> ItemOptions:
             opts.trim = False
         else:
             raise ScriptError(
-                f"unknown timeline option {raw_option.strip()!r}. Valid: cut, "
-                "crossfade [seconds], fade [seconds], trim silence, keep silence, "
-                "volume [dB], balance [dB], audio blend [seconds], "
-                "audio lead [seconds], "
-                "or a range like 2:10-5:30",
+                f"unknown timeline option {raw_option.strip()!r}. Valid: "
+                + ", ".join(name for name, _ in schema.ITEM_OPTIONS),
                 line,
             )
 
@@ -347,116 +328,47 @@ def _default_duration(join: Join, defaults: Defaults) -> float:
     return 0.0
 
 
-_OUTPUT_KEYS = {
-    "file": "file", "output": "file", "path": "file", "output file": "file",
-    "resolution": "resolution", "size": "resolution",
-    "fps": "fps", "frame rate": "fps", "framerate": "fps",
-    "encoder": "encoder", "video encoder": "encoder", "codec": "encoder",
-    "quality": "quality", "crf": "quality", "cq": "quality",
-    # Join settings, historically written here; routed across so scripts
-    # written against the old layout still open.
-    "fade in": "fade_in",
-    "fade out": "fade_out",
-    "dry run": "dry_run",
-}
-
-_JOIN_FROM_OUTPUT = {"fade_in", "fade_out"}
-
-# Settings that existed once and no longer do. Named so a script that still
-# carries one gets told what happened rather than "unknown setting".
-_RETIRED_KEYS = {
-    "audio adjust": "levelling replaces it -- see `## Auto Editor`",
-    "audio gain": "levelling replaces it -- see `## Auto Editor`",
-}
-
-_AUTOEDIT_KEYS = {
-    "balance audio": "enabled", "balance": "enabled", "balance levels": "enabled",
-    "audio target": "target_lufs", "target": "target_lufs",
-    "target loudness": "target_lufs", "loudness": "target_lufs",
-}
-
-_SILENCE_KEYS = {
-    "threshold": "threshold_db", "threshold db": "threshold_db",
-    "padding": "padding", "pad": "padding",
-    "min silence": "min_silence", "minimum silence": "min_silence",
-    "min segment": "min_segment", "minimum segment": "min_segment",
-}
-
-_DEFAULT_KEYS = {
-    "join": "join", "transition": "join",
-    "crossfade": "crossfade",
-    "fade": "fade",
-    "audio overlap": "audio_overlap", "prelap": "audio_overlap",
-    "audio first": "audio_overlap",
-    "trim silence": "trim_silence", "trim": "trim_silence",
-    "fade in": "fade_in", "fade out": "fade_out",
-    "audio blend": "audio_blend", "audio crossfade": "audio_blend",
-    "audio lead": "audio_lead", "audio offset": "audio_lead",
-}
+def _read(setting, value: str, line: int):
+    """Turn one written value into what the model wants to hold."""
+    kind = setting.kind
+    if kind == "text":
+        return value
+    if kind == "bool":
+        return _parse_bool(value, setting.key, line)
+    if kind == "int":
+        return int(_parse_number(value, setting.key, line))
+    if kind == "number":
+        return _parse_number(value, setting.key, line)
+    if kind == "optional number":
+        if _norm_key(value) in ("", "auto", "default", "follow", "follow picture"):
+            return None
+        return _parse_number(value, setting.key, line)
+    if kind == "resolution":
+        if not _RESOLUTION_RE.match(value):
+            raise ScriptError(f"{setting.key}: expected WxH, got {value!r}", line)
+        return value.lower().replace("\u00d7", "x").replace(" ", "")
+    if kind == "join":
+        word = _norm_key(value)
+        if word not in _JOIN_WORDS:
+            valid = ", ".join(sorted({j.value for j in Join}))
+            raise ScriptError(f"{setting.key}: expected {valid}, got {value!r}", line)
+        return _JOIN_WORDS[word]
+    raise AssertionError(f"unknown setting kind {kind!r}")
 
 
-def _apply_output(raw: dict[str, tuple[str, int]], base: Path, strict: bool = True) -> OutputSettings:
-    if "file" not in raw:
-        raise ScriptError("the Output section must set `file:` (the .mp4 to write)")
-
-    out = OutputSettings(file=_resolve_path(raw["file"][0], base))
-    # Loose parsing lets the UI load and fix a bad name; rendering re-checks.
-    if strict:
-        check_output_path(out.file, raw["file"][1])
-
-    for field_name, (value, line) in raw.items():
-        if field_name in _JOIN_FROM_OUTPUT or field_name == "file":
+def _apply_settings(
+    raw: list[tuple[object, str, int]], script_parts: dict, base: Path, strict: bool
+) -> None:
+    """Write every parsed setting onto the object that owns it."""
+    for setting, value, line in raw:
+        if setting.kind == "path":
+            resolved = _resolve_path(value, base)
+            # Loose parsing lets the UI load and fix a bad name; rendering re-checks.
+            if strict:
+                check_output_path(resolved, line)
+            setattr(script_parts[setting.target], setting.field, resolved)
             continue
-        if field_name == "resolution":
-            if not _RESOLUTION_RE.match(value):
-                raise ScriptError(f"resolution: expected WxH, got {value!r}", line)
-            out.resolution = value.lower().replace("\u00d7", "x").replace(" ", "")
-        elif field_name == "fps":
-            out.fps = int(_parse_number(value, "fps", line))
-        elif field_name == "encoder":
-            out.encoder = value
-        elif field_name == "quality":
-            out.quality = _parse_number(value, "quality", line)
-        elif field_name == "dry_run":
-            out.dry_run = _parse_bool(value, "dry run", line)
-        else:
-            setattr(out, field_name, _parse_number(value, field_name, line))
-
-    return out
-
-
-def _apply_autoedit(raw: dict[str, tuple[str, int]]) -> BalanceSettings:
-    settings = BalanceSettings()
-    for field_name, (value, line) in raw.items():
-        if field_name == "enabled":
-            settings.enabled = _parse_bool(value, "balance audio", line)
-        else:
-            settings.target_lufs = _parse_number(value, field_name, line)
-    return settings
-
-
-def _apply_silence(raw: dict[str, tuple[str, int]]) -> SilenceSettings:
-    settings = SilenceSettings()
-    for field_name, (value, line) in raw.items():
-        setattr(settings, field_name, _parse_number(value, field_name, line))
-    return settings
-
-
-def _apply_defaults(raw: dict[str, tuple[str, int]]) -> Defaults:
-    defaults = Defaults()
-    for field_name, (value, line) in raw.items():
-        if field_name == "join":
-            key = _norm_key(value)
-            if key not in _JOIN_WORDS:
-                raise ScriptError(
-                    f"join: expected cut, crossfade or fade, got {value!r}", line
-                )
-            defaults.join = _JOIN_WORDS[key]
-        elif field_name == "trim_silence":
-            defaults.trim_silence = _parse_bool(value, "trim silence", line)
-        else:
-            setattr(defaults, field_name, _parse_number(value, field_name, line))
-    return defaults
+        setattr(script_parts[setting.target], setting.field, _read(setting, value, line))
 
 
 def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
@@ -472,20 +384,11 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
     in_fence = False
     warnings: list[str] = []
 
-    raw_output: dict[str, tuple[str, int]] = {}
-    raw_autoedit: dict[str, tuple[str, int]] = {}
-    raw_silence: dict[str, tuple[str, int]] = {}
-    raw_defaults: dict[str, tuple[str, int]] = {}
+    settings: list[tuple[object, str, int]] = []
     assets: dict[str, str] = {}
     timeline: list[tuple[str, int]] = []
     saw_timeline = False
-
-    section_tables = {
-        "output": (_OUTPUT_KEYS, raw_output),
-        "autoedit": (_AUTOEDIT_KEYS, raw_autoedit),
-        "silence": (_SILENCE_KEYS, raw_silence),
-        "defaults": (_DEFAULT_KEYS, raw_defaults),
-    }
+    saw_file = False
 
     for lineno, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.rstrip()
@@ -499,12 +402,13 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
         heading = _HEADING_RE.match(line)
         if heading:
             name = _norm_key(heading.group(2))
+            found = schema.section_for(name)
             # A top-level `# Heading` that is not a section name is the title.
-            if len(heading.group(1)) == 1 and name not in _SECTION_ALIASES:
+            if len(heading.group(1)) == 1 and found is None:
                 title = heading.group(2).strip()
                 section = None
                 continue
-            section = _SECTION_ALIASES.get(name)
+            section = found
             if section is None:
                 warnings.append(f"line {lineno}: ignoring unknown section '{name}'")
             elif section == "timeline":
@@ -520,49 +424,58 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
 
         if section == "timeline":
             timeline.append((content, lineno))
-        elif section == "assets":
+            continue
+        if section == "assets":
             key, value = _split_kv(content, lineno, "Assets")
             assets[key] = value
-        else:
-            key, value = _split_kv(content, lineno, section.capitalize())
-            table, target = section_tables[section]
-            if key in _RETIRED_KEYS and key not in table:
-                warnings.append(
-                    f"line {lineno}: `{key}` was removed -- {_RETIRED_KEYS[key]}"
-                )
-                continue
-            if key not in table:
-                raise _unknown_key(key, table, section, lineno)
-            target[table[key]] = (value, lineno)
+            continue
+
+        key, value = _split_kv(content, lineno, "settings")
+        if key in schema.RETIRED:
+            warnings.append(f"line {lineno}: `{key}` was removed -- {schema.RETIRED[key]}")
+            continue
+        setting = schema.LOOKUP.get(key)
+        if setting is None:
+            raise _unknown_setting(key, lineno)
+        # Last one wins, which is what a reader would expect of a repeated line.
+        settings = [entry for entry in settings if entry[0] is not setting]
+        settings.append((setting, value, lineno))
+        saw_file = saw_file or setting.field == "file"
 
     if not saw_timeline:
         raise ScriptError("no `## Timeline` section found -- nothing to render")
+    if not saw_file:
+        raise ScriptError("the Output section must set `file:` (the video to write)")
 
-    output = _apply_output(raw_output, base, strict)
-    # A fade named in Output belongs to the joins; an explicit one there wins.
-    for key, value in raw_output.items():
-        if key in _JOIN_FROM_OUTPUT and key not in raw_defaults:
-            raw_defaults[key] = value
-    silence = _apply_silence(raw_silence)
-    balance = _apply_autoedit(raw_autoedit)
-    defaults = _apply_defaults(raw_defaults)
-    clips = _build_clips(timeline, assets, defaults, base, strict)
+    script = VideoScript(
+        source=path,
+        title=title,
+        output=OutputSettings(file=Path("output.mp4")),
+        silence=SilenceSettings(),
+        defaults=Defaults(),
+        balance=BalanceSettings(),
+        clips=[],
+    )
+    _apply_settings(
+        settings,
+        {
+            "output": script.output,
+            "silence": script.silence,
+            "defaults": script.defaults,
+            "balance": script.balance,
+        },
+        base,
+        strict,
+    )
 
-    if not clips:
+    script.clips = _build_clips(timeline, assets, script.defaults, base, strict)
+    if not script.clips:
         raise ScriptError("the Timeline section is empty -- nothing to render")
 
     for warning in warnings:
         print(f"  warning: {warning}")
 
-    return VideoScript(
-        source=path,
-        title=title,
-        output=output,
-        silence=silence,
-        defaults=defaults,
-        balance=balance,
-        clips=clips,
-    )
+    return script
 
 
 def _build_clips(
@@ -584,7 +497,9 @@ def _build_clips(
         join = opts.join if opts.join is not None else defaults.join
         duration = opts.duration if opts.duration is not None else _default_duration(join, defaults)
         trim = opts.trim if opts.trim is not None else defaults.trim_silence
-        gain = opts.gain_db if opts.gain_db is not None else 0.0
+        # Rounded so folding a legacy `balance` into `volume` writes back the
+        # number a person would read off, not 0.09999999999999964.
+        gain = round((opts.gain_db or 0.0) + opts.legacy_balance_db, 4)
 
         # None means "sound follows picture"; an explicit `auto` asks for that
         # back when the project as a whole has been given an overlap.
@@ -615,7 +530,6 @@ def _build_clips(
                     join_duration=duration,
                     trim_silence=trim,
                     audio_gain_db=gain,
-                    balance_db=opts.balance_db,
                     audio_blend=blend,
                     audio_lead=lead,
                     line=lineno,

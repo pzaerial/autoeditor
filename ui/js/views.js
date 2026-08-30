@@ -1,6 +1,5 @@
 import { renderClipTable } from "./clips.js";
 import { selectClip } from "./editor.js";
-import { balanceDb } from "./preview.js";
 import { renderClipList } from "./rail.js";
 import { audioFollowsPicture, audioJoinLabel, joinLabel, keptDuration, state } from "./state.js";
 import { $, el, fmt, toast } from "./util.js";
@@ -21,7 +20,6 @@ export function miniTimeline(target) {
     if (i > 0) tags.push(joinLabel(clip));
     if (clip.trim_silence) tags.push("trim silence");
     if (clip.audio_gain_db) tags.push(`${clip.audio_gain_db > 0 ? "+" : ""}${clip.audio_gain_db} dB`);
-    if (balanceDb(clip)) tags.push(`levelled ${balanceDb(clip) > 0 ? "+" : ""}${balanceDb(clip)}`);
     if (i > 0 && !audioFollowsPicture(clip)) tags.push(audioJoinLabel(clip));
     if (clip.regions && clip.regions.length) tags.push(`${clip.regions.length} region(s)`);
     if (clip.missing) tags.push("MISSING");

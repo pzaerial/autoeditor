@@ -105,12 +105,11 @@ class TimelineClip:
     join_duration: float
     trim_silence: bool
     line: int = 0
-    # This clip's own audio trim, added to the project-wide gain.
+    # This clip's level, in dB. There is exactly one: levelling measures it and
+    # writes it here, and it is the same number a person edits afterwards.
+    # Keeping a separate "measured" figure meant two controls for one outcome,
+    # and no way to tell from the UI which one was winning.
     audio_gain_db: float = 0.0
-    # What levelling worked out for this clip, kept apart from the manual trim
-    # so the two never fight and neither is applied twice. None means it has
-    # not been measured yet; the render measures it when balancing is on.
-    balance_db: float | None = None
     # How long this join's audio transition runs. None follows the picture's
     # join_duration, which is what makes a plain crossfade sound like one.
     audio_blend: float | None = None
@@ -172,8 +171,6 @@ class VideoScript:
             flags = "  [trim silence]" if clip.trim_silence else ""
             if clip.audio_gain_db:
                 flags += f"  [{clip.audio_gain_db:+g} dB]"
-            if clip.balance_db:
-                flags += f"  [balance {clip.balance_db:+g} dB]"
             if i > 1 and not clip.audio_follows_picture():
                 flags += f"  [audio {clip.blend_length():g}s @ {clip.audio_lead:+g}s]"
             if clip.regions:
@@ -204,7 +201,6 @@ def expand_regions(clips: list[TimelineClip]) -> list[TimelineClip]:
                 regions=[replace(region, join=Join.CUT, join_duration=0.0)],
                 join=clip.join if i == 0 else region.join,
                 join_duration=clip.join_duration if i == 0 else region.join_duration,
-                balance_db=clip.balance_db,
                 audio_blend=clip.audio_blend if i == 0 else None,
                 audio_lead=clip.audio_lead if i == 0 else 0.0,
                 label=clip.label if i == 0 else f"{clip.label} ({i + 1})",

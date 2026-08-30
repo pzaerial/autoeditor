@@ -28,19 +28,13 @@ function ensureAudioGraph() {
   return audioGraph;
 }
 
-/** The levelling trim, only when levelling is switched on. */
-export function balanceDb(clip) {
-  if (!clip || !state.project.balance.enabled) return 0;
-  return clip.balance_db || 0;
-}
-
-function totalGainDb() {
+function clipGainDb() {
   const clip = state.project.clips[state.selected];
-  return ((clip && clip.audio_gain_db) || 0) + balanceDb(clip);
+  return (clip && clip.audio_gain_db) || 0;
 }
 
 export function applyPreviewGain() {
-  const db = totalGainDb();
+  const db = clipGainDb();
   const ratio = Math.pow(10, db / 20);
   const graph = ensureAudioGraph();
   if (graph) {
@@ -54,12 +48,10 @@ export function applyPreviewGain() {
 }
 
 export function showGainTotal() {
-  const db = totalGainDb();
-  const levelled = balanceDb(state.project.clips[state.selected]);
+  const db = clipGainDb();
   const graph = ensureAudioGraph();
   $("clip-gain-total").textContent =
-    `${db > 0 ? "+" : ""}${db.toFixed(1)} dB total` +
-    (levelled ? ` (${levelled > 0 ? "+" : ""}${levelled} from levelling)` : "") +
+    `${db > 0 ? "+" : ""}${db.toFixed(1)} dB` +
     (!graph && db > 0 ? "  (preview cannot boost)" : "");
 }
 

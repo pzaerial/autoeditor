@@ -1,7 +1,6 @@
 import { selectClip, syncGainControls } from "./editor.js";
 import { showPage } from "./pages.js";
 import { openPicker } from "./picker.js";
-import { balanceDb } from "./preview.js";
 import { joinDuration, estimateLabel, keptDuration, state } from "./state.js";
 import { $, el, fmt } from "./util.js";
 import { makeReorderable, refreshAll, removeClip } from "./views.js";
@@ -28,7 +27,7 @@ export function renderClipTable() {
   }
 
   const head = el("div", "clip-head");
-  ["", "#", "Clip", "Joins from previous", "Audio", "Kept", ""].forEach((title) =>
+  ["", "#", "Clip", "Joins from previous", "Volume & silence", "Kept", ""].forEach((title) =>
     head.appendChild(el("div", null, title))
   );
   table.appendChild(head);
@@ -86,7 +85,9 @@ export function renderClipTable() {
     const gain = el("input", "mono jd");
     gain.type = "number";
     gain.step = "0.5";
-    gain.title = "Volume trim for this clip, in dB";
+    gain.title =
+      "How much this clip's sound is raised or lowered, in dB. " +
+      "Audio auto-balance fills this in for you; change it and your number stands.";
     gain.value = clip.audio_gain_db || 0;
     gain.addEventListener("change", () => {
       clip.audio_gain_db = parseFloat(gain.value) || 0;
@@ -95,14 +96,6 @@ export function renderClipTable() {
     });
     audio.appendChild(gain);
     audio.appendChild(el("span", "unit", "dB"));
-
-    // What levelling worked out, so the Clips page reflects it as soon as it runs.
-    const levelled = balanceDb(clip);
-    if (levelled) {
-      const tag = el("span", "levelled", `${levelled > 0 ? "+" : ""}${levelled}`);
-      tag.title = "Set by Balance clip levels; adds to the trim on the left";
-      audio.appendChild(tag);
-    }
 
     const trim = el("label", "check");
     const box = el("input");
@@ -113,7 +106,8 @@ export function renderClipTable() {
       refreshAll();
     });
     trim.appendChild(box);
-    trim.appendChild(el("span", null, "trim"));
+    trim.title = "Cut the dead air out of this clip";
+    trim.appendChild(el("span", null, "trim silence"));
     audio.appendChild(trim);
     row.appendChild(audio);
 

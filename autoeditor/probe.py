@@ -11,7 +11,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .loudness import balance_gain, measure_loudness
 from .silence import compute_keep_intervals
 from .timecode import format_time
 from .timeline import VideoScript, expand_regions
@@ -28,8 +27,6 @@ class ClipInfo:
     vcodec: str = ""
     acodec: str = ""
     pix_fmt: str = ""
-    # Levelling trim resolved for this clip, 0 when balancing is off.
-    balance_db: float = 0.0
     # Loud regions to keep; None means the clip plays in full.
     keep_intervals: list[tuple[float, float]] | None = None
 
@@ -175,26 +172,6 @@ def probe_script(script: VideoScript, *, verbose: bool = True, on_step=None) -> 
 
         info.keep_intervals = keep or None
 
-        if script.balance.enabled and info.has_audio:
-            # A level written into the script is trusted; anything else is
-            # measured now, over the spans the edit actually keeps.
-            if clip.balance_db is not None:
-                info.balance_db = clip.balance_db
-            else:
-                spans = info.keep_intervals or None
-                key = ("balance", clip.path, tuple(spans) if spans else None)
-                if key not in cache:
-                    log(f"    measuring loudness: {clip.path.name}")
-                    step(index, f"measuring loudness of {clip.path.name}")
-                    measured = measure_loudness(clip.path, spans)
-                    cache[key] = (
-                        balance_gain(measured, script.balance.target_lufs)
-                        if measured is not None and measured.usable else 0.0
-                    )
-                info.balance_db = cache[key]
-                if info.balance_db:
-                    log(f"      levelled {info.balance_db:+g} dB")
-
         if info.keep_intervals:
             removed = info.duration - info.effective_duration
             log(
@@ -206,6 +183,15 @@ def probe_script(script: VideoScript, *, verbose: bool = True, on_step=None) -> 
 
         infos.append(info)
         step(index + 1, f"read {clip.path.name}")
+
+    # Levelling sets each clip's `volume`; the render only applies it. If the
+    # switch is on but nothing was ever measured, the output will not be level
+    # and silence about that would be the wrong kind of quiet.
+    if script.balance.enabled and not any(c.audio_gain_db for c in todo):
+        log(
+            "    note: levelling is on but no clip has a level yet -- "
+            "measure them in the app, or set `volume` on each item"
+        )
 
     return infos
 

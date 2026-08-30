@@ -309,7 +309,10 @@ class BalanceJob:
         """What has to be measured, and how much audio each one is."""
         work = []
         for index, clip in enumerate(script.clips):
-            if only_unmeasured and clip.balance_db is not None:
+            # "Only unmeasured" now means a clip nobody has set a level on:
+            # there is one number, so a non-zero one is either a measurement
+            # already taken or a person's own choice. Neither wants overwriting.
+            if only_unmeasured and clip.audio_gain_db:
                 continue
             entry = {
                 "index": index, "label": clip.label, "gain": None, "note": "",
@@ -388,8 +391,17 @@ class BalanceJob:
                             peak=round(measured.peak_dbtp, 1),
                             gain=gain,
                         )
+                        # The cap keeps a bad measurement from turning a clip
+                        # into a wall of hiss, but a capped clip does NOT reach
+                        # the target -- say by how much, or the results box
+                        # claims a match that the render will not deliver.
                         if abs(gain) >= MAX_GAIN_DB - 0.05:
-                            entry["note"] = f"limited to {gain:+g} dB"
+                            short = abs(target - measured.lufs) - MAX_GAIN_DB
+                            entry["capped"] = round(short, 1)
+                            entry["note"] = (
+                                f"capped at {gain:+g} dB -- still {short:.1f} dB "
+                                f"{'under' if gain > 0 else 'over'} target"
+                            )
 
             with self.lock:
                 if self.state == "running":

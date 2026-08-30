@@ -82,12 +82,17 @@
           <label class="check"><input type="checkbox" id="bal-enabled"> Audio auto-balance</label>
         </legend>
         <div class="group-body">
+          <div class="hint">
+            Measures each clip and writes its <b>Volume</b> on the Clips page, so
+            they play at a matched level. Edit any of those numbers afterwards and
+            your value is kept.
+          </div>
           <div class="grid-2">
             <label>Target (LUFS) <input type="number" id="bal-target" step="1" value="-14"></label>
             <label>&nbsp;
               <div class="row tight">
-                <button id="balance-run" class="small">Re-measure</button>
-                <button id="balance-reset" class="ghost small">Clear</button>
+                <button id="balance-run" class="small" title="Measure every clip and write its Volume">Re-measure all</button>
+                <button id="balance-reset" class="ghost small" title="Set every clip's Volume back to 0 dB">Reset to 0 dB</button>
               </div>
             </label>
           </div>

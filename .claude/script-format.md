@@ -18,26 +18,78 @@ timeline options are errors, reported with the line number and the valid set.
 
 | Heading | Aliases | Purpose |
 |---|---|---|
-| `## Output` | `Output Settings`, `Settings` | Where the file goes, what format it is |
-| `## Defaults` | `Default`, `Joins`, `Global Edits` | How clips are joined, and to the black either end |
-| `## Auto Editor` | `Auto Edit`, `Passes` | Opt-in passes: levelling |
-| `## Silence` | `Trim Silence`, `Dead Space` | Dead-space detection tuning |
+| `## Output` | `Output Settings`, `Settings` | Where the file goes, and what kind of file it is |
+| `## Joins` | `Defaults`, `Global Edits` | How clips meet each other, and the black at either end |
+| `## Auto Editor` | `Auto Edit`, `Passes`, `Silence` | The opt-in passes: levelling and silence trimming |
 | `## Assets` | `Files`, `Sources` | Named shortcuts for reused clips |
 | `## Timeline` | `Sequence`, `Order` | The running order — required |
+
+Only `## Timeline` is required; everything else falls back to its default. A
+setting is understood wherever it appears, so an older file with `## Defaults`
+and `## Silence` still opens — saving it from the app rewrites it in the layout
+above.
 
 Keys are case- and punctuation-insensitive: `Fade In`, `fade_in`, `fade-in` and
 `**fade in**` are the same key. Values may be wrapped in backticks or quotes.
 
-## `## Output`
+## Settings
+
+Five sections, each with one job. Headings organise the file for a reader --
+the parser understands a setting wherever it appears, so a script written
+against an older layout still opens, and saving it from the app rewrites it in
+the arrangement below.
+
+<!-- generated:settings -->
+
+### `## Output`
+
+Where the file goes, and what kind of file it is.
+
+Also accepted as `## Output Settings`, `## Settings`.
 
 | Key | Aliases | Default | Description |
 |---|---|---|---|
-| `file` | `output`, `path`, `output file` | *required* | The `.mp4` to write; parent folders are created |
-| `resolution` | `size` | `1920x1080` | `WxH`. Sources are letterboxed to fit |
-| `fps` | `frame rate`, `framerate` | `60` | Output frame rate |
-| `encoder` | `video encoder`, `codec` | `libx264` | See encoders below |
-| `quality` | `crf`, `cq` | per encoder | Lower is better and bigger; CRF-like on every encoder |
-| `dry run` | | `no` | `yes` prints the resolved timeline and stops |
+| `file` | `output`, `path`, `output file` | *required* | The video to write; parent folders are created |
+| `resolution` | `size` | 1920x1080 | `WxH`. Sources are letterboxed to fit |
+| `fps` | `frame rate`, `framerate` | 60 | Output frame rate |
+| `encoder` | `video encoder`, `codec` | libx264 | See encoders below |
+| `quality` | `crf`, `cq` | per encoder | Lower is bigger and better; blank takes the encoder's default |
+| `dry run` |  | no | `yes` prints the resolved timeline and stops |
+
+### `## Joins`
+
+How clips meet each other, and the black at either end.
+
+Also accepted as `## Join`, `## Defaults`, `## Default`, `## Global Edits`, `## Global`, `## Globals`, `## Master`.
+
+| Key | Aliases | Default | Description |
+|---|---|---|---|
+| `join` | `transition` | `crossfade` | Join used when a timeline item does not name one |
+| `crossfade` |  | `0.3` | Default `crossfade` length (seconds) |
+| `fade` |  | `0.5` | Default `fade` length (seconds) |
+| `audio overlap` | `prelap`, `audio first` | `2` | Default `audio overlap` length (seconds) |
+| `audio blend` | `audio crossfade` | *follow picture* | How long a join's sound takes to change hands; blank follows the picture |
+| `audio lead` | `audio offset` | `0` | Seconds the sound changes before the picture does |
+| `fade from black` | `fade in` | `0.5` | Opening fade, at the very start (seconds) |
+| `fade to black` | `fade out` | `0.5` | Closing fade, at the very end (seconds) |
+
+### `## Auto Editor`
+
+Passes that edit the footage for you. Each is opt-in; with both off, clips render exactly as cut.
+
+Also accepted as `## Auto Edit`, `## Passes`, `## Silence`, `## Trim Silence`, `## Dead Space`, `## Dead Space Removal`.
+
+| Key | Aliases | Default | Description |
+|---|---|---|---|
+| `balance audio` | `balance`, `balance levels` | `no` | Level every clip to the same loudness |
+| `audio target` | `target`, `target loudness`, `loudness` | `-14` | LUFS to level to; -14 is what YouTube normalises to |
+| `trim silence` | `trim` | `no` | Remove dead air, unless a timeline item says otherwise |
+| `silence threshold` | `threshold`, `threshold db` | `-30` | Silence floor in dB **below the clip's own peak** |
+| `silence padding` | `padding`, `pad` | `0.5` | Seconds kept around each loud region; gaps under 2x this merge |
+| `silence min length` | `min silence`, `minimum silence` | `1` | A silence must run this long to be cut |
+| `silence min segment` | `min segment`, `minimum segment` | `0.5` | Kept regions shorter than this are dropped |
+
+<!-- /generated:settings -->
 
 Encoders with tuned quality flags: `libx264` (18), `libx265` (22); `h264_nvenc`
 (23), `hevc_nvenc` (25), `av1_nvenc` (25); `h264_amf` (22), `hevc_amf` (24);
@@ -59,6 +111,14 @@ Audio output is always AAC 192 kbps, 48 kHz stereo. The container follows the
 output file's extension: `.mp4`, `.mov` and `.mkv` all take these codecs, and
 `+faststart` is applied to the mp4-family ones that have an index to move.
 
+### Retired options
+
+`balance [dB]` was a second per-item level, holding what auto-balance measured
+while `volume` held what you typed. One outcome with two controls meant neither
+number told you how a clip would sound, so there is one now: auto-balance writes
+`volume`. A script still carrying `balance` opens and renders the same -- the two
+are added -- and saving it writes the single total.
+
 ### Retired settings
 
 `audio adjust` (a gain applied to every clip) was removed: levelling in
@@ -68,83 +128,6 @@ still carrying it is warned and otherwise unaffected.
 `fade in` and `fade out` were once in `## Output` and then in `## Global Edits`.
 They are join settings and now live in `## Defaults`; both older spellings are
 still read, so no script needs rewriting.
-
-## `## Auto Editor`
-
-Passes that edit the footage for you. Each is opt-in; with none on, clips render
-exactly as cut.
-
-| Key | Aliases | Default | Description |
-|---|---|---|---|
-| `balance audio` | `balance`, `balance levels` | `no` | Level every clip to the same loudness |
-| `audio target` | `target`, `target loudness` | `-14` | LUFS to level to; what YouTube normalises to |
-
-```markdown
-## Auto Editor
-
-- balance audio: yes
-- audio target: -14 LUFS
-```
-
-With this on, every clip is measured over the ranges the edit keeps and given
-the trim that lands it on the target.
-
-The measure is the median of its gated 400 ms loudness blocks — "the level it
-sits at most of the time" — rather than R128's integrated figure, which one loud
-moment can throw by tens of dB and which would otherwise let a single explosion
-decide the level of a two-hour recording. Peaks are not consulted at all; the
-render puts a limiter on the finished audio instead, so loud peaks stay loud
-without clipping. The trim never exceeds ±24 dB.
-
-The measurement is recorded per item as `balance N dB`, so it is done once. The
-app writes those when you tick the box; a render measures anything still
-unmeasured, which is what makes a hand-written script come out level too.
-
-`volume` is separate and adds to it: levelling sets the base, `volume` is your
-own adjustment on top, and neither overwrites the other.
-
-## `## Defaults`
-
-How clips are joined: to each other, and to the black either end. Aliases:
-`## Default`, `## Joins`, `## Global Edits`.
-
-| Key | Aliases | Default | Description |
-|---|---|---|---|
-| `join` | `transition` | `crossfade` | Join used when a timeline item does not state one |
-| `crossfade` | | `0.3` | Default crossfade length (seconds) |
-| `fade` | | `0.5` | Default fade-through-black length (seconds) |
-| `audio overlap` | `prelap`, `audio first` | `2` | Default length for an `audio overlap` join (seconds) |
-| `fade in` | | `0.5` | Fade up from black at the very start (seconds) |
-| `fade out` | | `0.5` | Fade to black at the very end (seconds) |
-| `trim silence` | `trim` | `no` | Whether clips get dead-space removal by default |
-| `audio blend` | `audio crossfade` | *follow picture* | Default length of a join's audio transition (seconds) |
-| `audio lead` | `audio offset` | `0` | Default seconds the audio transition happens before the picture cut |
-
-```markdown
-## Defaults
-
-- join: crossfade
-- crossfade: 0.3
-- fade: 0.5
-- audio overlap: 2
-- fade in: 0.5
-- fade out: 0.5
-- trim silence: no
-```
-
-## `## Silence`
-
-Detection is per clip and relative to that clip's own peak loudness, so it
-adapts to different mic gain between sessions.
-
-| Key | Aliases | Default | Description |
-|---|---|---|---|
-| `threshold` | `threshold db` | `-30` | Silence floor in dB **below the clip's peak**. More negative = less aggressive |
-| `padding` | `pad` | `0.5` | Seconds kept around each loud region; gaps under `2×` this merge |
-| `min silence` | `minimum silence` | `1.0` | A silence must run this long to be eligible for cutting |
-| `min segment` | `minimum segment` | `0.5` | Kept regions shorter than this are dropped |
-
-Trailing units are ignored, so `-30 dB` and `0.5s` parse fine.
 
 ## `## Assets`
 
@@ -190,8 +173,7 @@ ignored.
 | `audio overlap [seconds]` | `audio first`, `prelap`, `j-cut` | This clip is *heard* that many seconds before it is *seen* |
 | `trim silence` | `trim`, `remove silence`, `remove dead space` | Remove dead air from this clip |
 | `keep silence` | `no trim`, `no trim silence` | Leave this clip's dead air alone |
-| `volume [dB]` | `gain`, `audio` | Level trim for this clip, added to whatever levelling set |
-| `balance [dB]` | | What levelling measured for this clip; written by the app, so it is not re-measured |
+| `volume [dB]` | `gain`, `audio` | This clip's level. Auto-balance writes it; edit it and your value stands |
 | `audio blend [seconds]` | `audio crossfade` | Length of this join's audio transition; `auto` follows the picture |
 | `audio lead [seconds]` | `audio offset` | Seconds the audio transition happens before the picture cut |
 | `2:10-5:30` | `2:10 to 5:30` | Keep only this range of the source |

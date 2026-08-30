@@ -790,14 +790,8 @@ button.danger:hover:not(:disabled) { border-color: var(--bad); background: #2e1c
 .settings-grid .row { margin: 5px 0; }
 .settings-grid .check { margin: 6px 0 2px; }
 
-/* ---------- levelling tag ---------- */
-
-.clip-row .levelled {
-  font-size: 11px;
-  color: var(--good);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  white-space: nowrap;
-}
+.balance-row.capped .gain,
+.balance-row.capped .why { color: var(--warn); }
 
 /* ---------- balance progress ---------- */
 

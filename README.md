@@ -64,12 +64,18 @@ Full reference: [.claude/script-format.md](.claude/script-format.md).
 |---|---|
 | `# Title` | episode name; cosmetic |
 | `## Output` | destination file and format |
-| `## Defaults` | how clips are joined, and to the black either end |
-| `## Silence` | dead-space detection tuning |
+| `## Joins` | how clips meet each other, and the black at either end |
+| `## Auto Editor` | the opt-in passes: levelling and silence trimming |
 | `## Assets` | named shortcuts for reused clips |
 | `## Timeline` | the running order — required |
 
-Keys are case- and punctuation-insensitive: `Fade In` = `fade_in` = `fade-in`.
+Only `## Timeline` is required. Keys are case- and punctuation-insensitive
+(`Fade In` = `fade_in` = `fade-in`), and a setting is understood wherever it
+appears — so an older file using `## Defaults` and `## Silence` still opens.
+Saving it from the app rewrites it in the layout above.
+
+The full reference, generated from the one place the settings are declared, is in
+[.claude/script-format.md](.claude/script-format.md).
 
 ### Output
 
@@ -101,33 +107,6 @@ the low teens while the encoder engine runs at 100% — the render page graphs b
 encoder trace is the one that matters. The CPU stays busy for a real reason: decoding every
 input and running the transitions is CPU work whatever encodes the result, and that stage
 alone was 3.9s of those 5.5s.
-
-### Defaults
-
-| Key | Default | Value |
-|---|---|---|
-| `join` | `crossfade` | `cut`, `crossfade`, `fade` or `audio overlap` |
-| `crossfade` | `0.3` | seconds |
-| `fade` | `0.5` | seconds |
-| `audio overlap` | `2` | seconds; default length for an `audio overlap` join |
-| `fade in` | `0.5` | seconds, up from black at the start |
-| `fade out` | `0.5` | seconds, to black at the end |
-| `trim silence` | `no` | `yes` / `no` |
-| `audio blend` | *follow picture* | seconds; default length of a join's audio transition |
-| `audio lead` | `0` | seconds the audio transition runs ahead of the picture cut |
-
-### Silence
-
-Per clip, relative to that clip's own peak.
-
-| Key | Default | Value |
-|---|---|---|
-| `threshold` | `-30 dB` | floor below peak; more negative = less aggressive |
-| `padding` | `0.5` | seconds kept around each loud region; gaps under `2×` merge |
-| `min silence` | `1.0` | seconds before a silence can be cut |
-| `min segment` | `0.5` | seconds; shorter keeps are dropped |
-
-Trailing units optional: `-30 dB`, `0.5s`.
 
 ### Timeline
 

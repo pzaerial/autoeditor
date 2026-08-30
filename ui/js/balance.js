@@ -28,17 +28,24 @@ export function showAutoEditorState() {
 // Clips recorded in different sessions rarely match, and matching them by ear
 // one at a time is the tedious part of assembling an episode.
 //
-// The measured trim lives in `balance_db`, apart from the manual `audio_gain_db`
-// so the two never fight and neither is applied twice. Switching the option on
-// measures what is already here and every clip added afterwards, so the preview
-// you trim against is already levelled; the render measures anything still
-// unmeasured, so a script that never met the app still comes out level.
+// Levelling writes each clip's `audio_gain_db` -- the same number shown in the
+// Volume column and editable there. There is deliberately no second "measured"
+// field: two numbers for one outcome meant the Clips page could not say what a
+// clip would actually sound like, and an edit could be silently overruled.
+//
+// So this measures; it is not an effect. Switching it on levels what is here
+// and every clip added afterwards; a value you type afterwards is yours and is
+// left alone unless you ask for a re-measure.
+
+// Matches MAX_GAIN_DB in loudness.py; only used to word the summary.
+const MAX_BOOST_DB = 24;
 
 export function showBalanceResults(rows) {
   const box = $("balance-results");
   box.innerHTML = "";
   rows.forEach((row) => {
-    const line = el("div", "balance-row" + (row.gain === null ? " skipped" : ""));
+    const line = el("div", "balance-row" +
+      (row.gain === null ? " skipped" : "") + (row.capped ? " capped" : ""));
     line.appendChild(el("span", "who", `${row.index + 1}. ${row.label}`));
     line.appendChild(el("span", "was", row.lufs === undefined ? "" : `${row.lufs} LUFS`));
     line.appendChild(el("span", "gain",
@@ -75,9 +82,9 @@ function showBalanceProgress(status) {
 export async function runBalance({ onlyUnmeasured } = {}) {
   if (balancing) return;
   const note = $("balance-note");
-  const pending = state.project.clips.filter(
-    (c) => !onlyUnmeasured || c.balance_db === null || c.balance_db === undefined
-  );
+  // With one number, "not yet levelled" is "still sitting at 0 dB" -- anything
+  // else is either a measurement already taken or a level someone chose.
+  const pending = state.project.clips.filter((c) => !onlyUnmeasured || !c.audio_gain_db);
   if (!pending.length) {
     if (!onlyUnmeasured) {
       note.textContent = "Add some clips first.";
@@ -141,15 +148,20 @@ export async function pollBalance(target) {
   status.clips.forEach((row) => {
     const clip = state.project.clips[row.index];
     if (!clip || row.gain === null || row.gain === undefined) return;
-    clip.balance_db = row.gain;
+    clip.audio_gain_db = row.gain;
     set += 1;
   });
   showBalanceResults(status.clips);
   const skipped = status.clips.length - set;
+  // A capped clip got a number but not the target, so it must not be counted
+  // as levelled in the summary -- that is the one you would fix by hand.
+  const capped = status.clips.filter((c) => c.capped).length;
   note.textContent =
-    `Levelled ${set} clip(s) to ${target} LUFS` +
-    (skipped ? `; ${skipped} could not be measured.` : ".");
-  note.className = skipped ? "note warn" : "note ok";
+    `Levelled ${set - capped} of ${status.clips.length} clip(s) to ${target} LUFS` +
+    (capped ? `; ${capped} too quiet to reach it, even at the ${MAX_BOOST_DB} dB limit` : "") +
+    (skipped ? `; ${skipped} could not be measured` : "") +
+    ".";
+  note.className = capped || skipped ? "note warn" : "note ok";
   refreshAll();
   if (state.selected >= 0) syncGainControls();
 }
@@ -182,21 +194,27 @@ export async function adoptRunningBalance() {
 
 $("balance-run").addEventListener("click", () => {
   formToProject();
-  state.project.clips.forEach((c) => (c.balance_db = null));
   runBalance();
 });
 
+// This clears the one volume number, so it also clears anything typed by hand.
+// Say that plainly rather than quietly discarding someone's work.
 $("balance-reset").addEventListener("click", () => {
-  state.project.clips.forEach((clip) => (clip.balance_db = null));
+  const set = state.project.clips.filter((c) => c.audio_gain_db).length;
+  if (set && !confirm(
+    `Set all ${set} clip volume(s) back to 0 dB? This clears levels you typed too.`
+  )) return;
+  state.project.clips.forEach((clip) => (clip.audio_gain_db = 0));
   showBalanceResults([]);
-  $("balance-note").textContent = "Levelling cleared; clips play at their own level.";
+  $("balance-note").textContent = "Every clip is back to 0 dB and plays at its own level.";
   $("balance-note").className = "note";
   refreshAll();
   if (state.selected >= 0) syncGainControls();
 });
 
-// Switching it on levels what is already here; switching it off leaves the
-// measurements in place but stops them being applied.
+// Switching it on levels whatever has no level yet, and keeps doing that for
+// clips added later. Switching it off only stops the measuring: the volumes it
+// worked out are ordinary clip volumes now, and stay until they are changed.
 $("bal-enabled").addEventListener("change", () => {
   formToProject();
   showAutoEditorState();
@@ -211,8 +229,5 @@ $("bal-enabled").addEventListener("change", () => {
 
 $("bal-target").addEventListener("change", () => {
   formToProject();
-  if (state.project.balance.enabled) {
-    state.project.clips.forEach((c) => (c.balance_db = null));
-    runBalance();
-  }
+  if (state.project.balance.enabled) runBalance();
 });

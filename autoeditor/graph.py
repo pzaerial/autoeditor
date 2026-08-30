@@ -229,7 +229,7 @@ def _place_audio(
         parts += made
 
         chain = ["aresample=48000"]
-        gain = clips[i].audio_gain_db + info.balance_db
+        gain = clips[i].audio_gain_db
         if abs(gain) > 1e-9:
             chain.append(f"volume={gain:g}dB")
         chain.append(_pin(item["duration"]).rstrip(","))
@@ -344,7 +344,7 @@ def build_filter_complex(
             continue
         if info.has_audio:
             # This clip's own trim and what levelling worked out are one gain.
-            gain = clips[i].audio_gain_db + info.balance_db
+            gain = clips[i].audio_gain_db
             level = f"volume={gain:g}dB," if abs(gain) > 1e-9 else ""
             parts.append(
                 f"{a_src}"

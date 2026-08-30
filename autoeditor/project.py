@@ -50,7 +50,6 @@ def clip_to_json(clip: TimelineClip) -> dict:
         "join_duration": clip.join_duration,
         "trim_silence": clip.trim_silence,
         "audio_gain_db": clip.audio_gain_db,
-        "balance_db": clip.balance_db,
         "audio_blend": clip.audio_blend,
         "audio_lead": clip.audio_lead,
         "regions": [
@@ -116,7 +115,6 @@ def from_json(data: dict) -> VideoScript:
                 join_duration=float(raw.get("join_duration", 0.3)),
                 trim_silence=bool(raw.get("trim_silence", False)),
                 audio_gain_db=float(raw.get("audio_gain_db", 0.0)),
-                balance_db=_optional(raw.get("balance_db")),
                 audio_blend=_optional(raw.get("audio_blend")),
                 audio_lead=float(raw.get("audio_lead") or 0.0),
                 regions=regions,
