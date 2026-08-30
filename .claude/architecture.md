@@ -23,12 +23,15 @@ There is no `.env`, no click CLI and no hard-coded assembly order — a markdown
 the equivalent project built in the app) is the only input.
 
 ## timeline.py
-Pure data, no logic. `VideoScript` holds `OutputSettings`, `GlobalEdits`, `SilenceSettings`, `Defaults` and an ordered `list[TimelineClip]`.
+Pure data, no logic. `VideoScript` holds `OutputSettings`, `SilenceSettings`, `BalanceSettings`, `Defaults` and an ordered `list[TimelineClip]`.
 
-`OutputSettings` is *where and what format*. `GlobalEdits` is *what is done to the whole
-thing*: the opening and closing fades, and `audio_gain_db`, a level applied to every clip.
-Keeping them apart is what lets the app show a Global Edits panel that is not a grab-bag
-of encoder settings.
+`OutputSettings` is *where and what format*. `Defaults` is *how clips are joined* — to each
+other and to the black either end, which is why the opening and closing fades live there
+rather than in a section of their own.
+
+`GlobalEdits` is gone. Its `audio_gain_db` was a gain applied to every clip by guesswork,
+which levelling now does by measurement; keeping both would have meant two ways to set the
+same thing, applied in sequence. Its fades were join settings all along.
 
 Each `TimelineClip` carries the `Join` describing how it attaches to the clip **before** it (`CUT`, `CROSSFADE`, `FADE`) plus that join's duration, so the whole edit is a flat list. `regions` optionally narrows a clip to `[(start, end)]` ranges of its source; `audio_gain_db` is that clip's own level trim; `audio_overlap` and `audio_lead` describe how the join's *sound* is handled when it should not simply follow the picture (`audio_follows_picture()` is the test the renderer branches on); `missing` flags a file that was absent when the script was loaded non-strictly. `VideoScript.describe()` renders the summary printed before a render.
 
@@ -37,9 +40,12 @@ Each `TimelineClip` carries the `Join` describing how it attaches to the clip **
 
 Only two line shapes are meaningful: `#` headings open sections, and list items carry values. Everything else — prose, blockquotes, fenced blocks — is skipped, so scripts double as episode notes. Unknown sections warn; unknown keys and options are hard errors listing the valid ones.
 
-`fade in`, `fade out` and `audio adjust` belong to `## Global Edits` but are still
-accepted under `## Output`, where they used to live; `_GLOBAL_FROM_OUTPUT` routes them
-across, with an explicit Global Edits entry winning.
+`fade in` and `fade out` are join settings in `## Defaults`, but were once written under
+`## Output` and later under `## Global Edits`. `_JOIN_FROM_OUTPUT` routes the first spelling
+across and `_SECTION_ALIASES` maps the second onto `## Defaults`, so no existing script
+needs rewriting. `_RETIRED_KEYS` names settings that no longer exist -- `audio adjust` --
+so a script still carrying one is told what replaced it rather than failing on an unknown
+key.
 
 Section aliases live in `_SECTION_ALIASES`; key aliases in `_OUTPUT_KEYS` / `_GLOBAL_KEYS` /
 `_SILENCE_KEYS` / `_DEFAULT_KEYS`. Keys are normalised by `_norm_key` so `Fade In`, `fade_in` and `**fade-in**` all match.

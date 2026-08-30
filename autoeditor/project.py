@@ -5,7 +5,6 @@ from pathlib import Path
 from .timeline import (
     BalanceSettings,
     Defaults,
-    GlobalEdits,
     Join,
     OutputSettings,
     Region,
@@ -65,7 +64,6 @@ def clip_to_json(clip: TimelineClip) -> dict:
 
 def to_json(script: VideoScript) -> dict:
     out, defaults, silence = script.output, script.defaults, script.silence
-    edits = script.globals
     return {
         "title": script.title,
         "source": str(script.source),
@@ -76,16 +74,13 @@ def to_json(script: VideoScript) -> dict:
             "encoder": out.encoder,
             "quality": out.quality,
         },
-        "globals": {
-            "fade_in": edits.fade_in,
-            "fade_out": edits.fade_out,
-            "audio_gain_db": edits.audio_gain_db,
-        },
         "defaults": {
             "join": defaults.join.value,
             "crossfade": defaults.crossfade,
             "fade": defaults.fade,
             "trim_silence": defaults.trim_silence,
+            "fade_in": defaults.fade_in,
+            "fade_out": defaults.fade_out,
             "audio_overlap": defaults.audio_overlap,
             "audio_lead": defaults.audio_lead,
         },
@@ -105,7 +100,6 @@ def to_json(script: VideoScript) -> dict:
 
 def from_json(data: dict) -> VideoScript:
     out = data.get("output", {})
-    edits = data.get("globals", {})
     defaults = data.get("defaults", {})
     silence = data.get("silence", {})
 
@@ -139,16 +133,13 @@ def from_json(data: dict) -> VideoScript:
             encoder=out.get("encoder", "libx264"),
             quality=_optional(out.get("quality")),
         ),
-        globals=GlobalEdits(
-            fade_in=float(edits.get("fade_in", out.get("fade_in", 0.5))),
-            fade_out=float(edits.get("fade_out", out.get("fade_out", 0.5))),
-            audio_gain_db=float(edits.get("audio_gain_db", 0.0)),
-        ),
         defaults=Defaults(
             join=Join(defaults.get("join", "crossfade")),
             crossfade=float(defaults.get("crossfade", 0.3)),
             fade=float(defaults.get("fade", 0.5)),
             trim_silence=bool(defaults.get("trim_silence", False)),
+            fade_in=float(defaults.get("fade_in", 0.5)),
+            fade_out=float(defaults.get("fade_out", 0.5)),
             audio_overlap=_optional(defaults.get("audio_overlap")),
             audio_lead=float(defaults.get("audio_lead") or 0.0),
         ),

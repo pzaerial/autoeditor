@@ -28,27 +28,46 @@
   <div class="settings-grid">
 
     <div class="col">
-      <h2>Template</h2>
-      <div class="row">
-        <select id="template-select"><option value="">Blank project</option></select>
-        <button id="load-template" class="primary">Load</button>
+      <h2>Project</h2>
+      <div class="field">
+        <span class="field-label">Editing</span>
+        <span class="field-value" id="project-current">Untitled</span>
       </div>
-      <div class="row tight">
-        <input type="text" id="template-name" placeholder="my-episode">
-        <button id="save-template">Save as</button>
+      <label>Open
+        <div class="row tight">
+          <select id="template-select"></select>
+          <button id="load-template">Open</button>
+        </div>
+      </label>
+      <div class="row">
+        <button id="save-template" class="primary">Save</button>
+        <button id="save-template-as">Save as&hellip;</button>
       </div>
       <div id="template-note" class="note"></div>
     </div>
 
     <div class="col">
       <h2>Output</h2>
-      <label>File
-        <input type="text" id="out-file" placeholder="C:\Users\you\Videos\out\episode.mp4">
+      <label>Folder
+        <div class="row tight">
+          <input type="text" id="out-folder" placeholder="C:\Users\you\Videos\out">
+          <button id="browse-output">Browse&hellip;</button>
+        </div>
+      </label>
+      <label>File name
+        <div class="row tight">
+          <input type="text" id="out-name" placeholder="episode">
+          <select id="out-format" class="narrow">
+            <option value=".mp4">.mp4</option>
+            <option value=".mov">.mov</option>
+            <option value=".mkv">.mkv</option>
+          </select>
+        </div>
       </label>
       <div id="out-check" class="note"></div>
       <div class="grid-2">
         <label>Resolution <input type="text" id="out-resolution" value="1920x1080"></label>
-        <label>FPS <input type="number" id="out-fps" value="60" min="1"></label>
+        <label>Frame rate <input type="number" id="out-fps" value="60" min="1"></label>
         <label>Encoder <select id="out-encoder"></select></label>
         <label>Quality <input type="number" id="out-quality" step="1" min="0" max="51" placeholder="default"></label>
       </div>
@@ -56,68 +75,74 @@
     </div>
 
     <div class="col">
-      <h2>Global Edits</h2>
-      <div class="grid-2">
-        <label>Fade in (s) <input type="number" id="glob-fade-in" value="0.5" step="0.1" min="0"></label>
-        <label>Fade out (s) <input type="number" id="glob-fade-out" value="0.5" step="0.1" min="0"></label>
-        <label>Audio adjust (dB) <input type="number" id="glob-audio-gain" value="0" step="0.5"></label>
-      </div>
-    </div>
+      <h2>Auto-Editor <span class="hint-inline" id="autoeditor-state"></span></h2>
 
-    <div class="col">
-      <h2>Joins</h2>
-      <div class="grid-2">
-        <label>Default join
-          <select id="def-join">
-            <option value="crossfade">crossfade</option>
-            <option value="cut">cut</option>
-            <option value="fade">fade</option>
-          </select>
-        </label>
-        <label>Crossfade (s) <input type="number" id="def-crossfade" value="0.3" step="0.1" min="0"></label>
-        <label>Fade (s) <input type="number" id="def-fade" value="0.5" step="0.1" min="0"></label>
-        <label>Audio overlap (s)
-          <input type="number" id="def-audio-overlap" step="0.1" min="0" placeholder="follow picture">
-        </label>
-        <label>Audio lead (s) <input type="number" id="def-audio-lead" value="0" step="0.1"></label>
-      </div>
-    </div>
-
-    <details class="col panel" id="panel-autoeditor">
-      <summary>
-        <h2>Auto-Editor</h2>
-        <span class="panel-state" id="autoeditor-state">off</span>
-      </summary>
-
-      <label class="check"><input type="checkbox" id="bal-enabled"> Balance clip levels</label>
-      <div class="grid-2">
-        <label>Target (LUFS) <input type="number" id="bal-target" step="1" value="-14"></label>
-        <label>&nbsp;
-          <div class="row tight">
-            <button id="balance-run">Re-measure</button>
-            <button id="balance-reset" class="ghost">Clear</button>
+      <fieldset class="group" id="group-balance">
+        <legend>
+          <label class="check"><input type="checkbox" id="bal-enabled"> Audio auto-balance</label>
+        </legend>
+        <div class="group-body">
+          <div class="grid-2">
+            <label>Target (LUFS) <input type="number" id="bal-target" step="1" value="-14"></label>
+            <label>&nbsp;
+              <div class="row tight">
+                <button id="balance-run" class="small">Re-measure</button>
+                <button id="balance-reset" class="ghost small">Clear</button>
+              </div>
+            </label>
           </div>
-        </label>
-      </div>
-      <div class="progress-wrap hidden" id="balance-progress">
-        <div class="progress"><div id="balance-bar"></div></div>
-        <div class="row tight">
-          <span id="balance-progress-text" class="hint mono"></span>
-          <span class="spacer"></span>
-          <button id="balance-cancel" class="ghost small">Cancel</button>
+          <div class="progress-wrap hidden" id="balance-progress">
+            <div class="progress"><div id="balance-bar"></div></div>
+            <div class="row tight">
+              <span id="balance-progress-text" class="hint mono"></span>
+              <span class="spacer"></span>
+              <button id="balance-cancel" class="ghost small">Cancel</button>
+            </div>
+          </div>
+          <div id="balance-note" class="note"></div>
+          <div id="balance-results" class="balance-results"></div>
         </div>
-      </div>
-      <div id="balance-note" class="note"></div>
-      <div id="balance-results" class="balance-results"></div>
+      </fieldset>
 
-      <label class="check"><input type="checkbox" id="def-trim"> Trim silence</label>
-      <div class="grid-2">
-        <label>Threshold (dB) <input type="number" id="sil-threshold" value="-30" step="1"></label>
-        <label>Padding (s) <input type="number" id="sil-padding" value="0.5" step="0.1" min="0"></label>
-        <label>Min silence (s) <input type="number" id="sil-min-silence" value="1" step="0.1" min="0"></label>
-        <label>Min segment (s) <input type="number" id="sil-min-segment" value="0.5" step="0.1" min="0"></label>
-      </div>
-    </details>
+      <fieldset class="group" id="group-silence">
+        <legend>
+          <label class="check"><input type="checkbox" id="def-trim"> Silence trimming</label>
+        </legend>
+        <div class="group-body">
+          <div class="grid-2">
+            <label>Threshold (dB) <input type="number" id="sil-threshold" value="-30" step="1"></label>
+            <label>Padding (s) <input type="number" id="sil-padding" value="0.5" step="0.1" min="0"></label>
+            <label>Min silence (s) <input type="number" id="sil-min-silence" value="1" step="0.1" min="0"></label>
+            <label>Min segment (s) <input type="number" id="sil-min-segment" value="0.5" step="0.1" min="0"></label>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset class="group">
+        <legend><span class="legend-text">Clip joining</span></legend>
+        <div class="group-body">
+          <div class="grid-2">
+            <label>Default join
+              <select id="def-join">
+                <option value="crossfade">crossfade</option>
+                <option value="cut">cut</option>
+                <option value="fade">fade</option>
+              </select>
+            </label>
+            <label>Crossfade (s) <input type="number" id="def-crossfade" value="0.3" step="0.1" min="0"></label>
+            <label>Fade (s) <input type="number" id="def-fade" value="0.5" step="0.1" min="0"></label>
+            <label>Audio overlap (s)
+              <input type="number" id="def-audio-overlap" step="0.1" min="0" placeholder="follow picture">
+            </label>
+            <label>Audio lead (s) <input type="number" id="def-audio-lead" value="0" step="0.1"></label>
+          </div>
+          <div class="grid-2">
+            <label>Opens from black (s) <input type="number" id="def-fade-in" value="0.5" step="0.1" min="0"></label>
+            <label>Ends to black (s) <input type="number" id="def-fade-out" value="0.5" step="0.1" min="0"></label>
+          </div>
+        </div>
+      </fieldset>
+    </div>
 
   </div>
 </section>
@@ -156,6 +181,12 @@
       <input type="checkbox" id="relink-rest-box">
       <span id="relink-rest-text"></span>
     </label>
+    <div class="row hidden" id="picker-name-row">
+      <label class="inline grow">File name
+        <input type="text" id="picker-name" placeholder="my-episode">
+      </label>
+      <span id="picker-ext" class="hint mono"></span>
+    </div>
     <div class="row between">
       <span id="picker-count" class="hint">Nothing selected</span>
       <button id="add-selected" class="primary">Add selected</button>
@@ -289,7 +320,10 @@
 
     <div>
       <h2>Output</h2>
-      <label>File <input type="text" id="render-out-file"></label>
+      <div class="field">
+        <span class="field-label">File</span>
+        <span class="field-value mono" id="render-out-file"></span>
+      </div>
       <div id="render-out-check" class="note"></div>
 
       <div class="row">
@@ -321,13 +355,9 @@
         <button id="btn-reveal">Open output folder</button>
       </div>
 
-      <h2>Export</h2>
-      <p class="hint">Write this project as a markdown script. <code>python script.py &lt;file&gt;</code> renders it identically.</p>
-      <div class="row">
-        <input type="text" id="export-path" placeholder="templates\my-episode.md">
-        <button id="btn-export">Export .md</button>
-      </div>
-      <div id="export-note" class="note"></div>
+      <h2>Script</h2>
+      <p class="hint">This project is a markdown script; <code>python script.py &lt;file&gt;</code>
+        renders it identically. Save it from <b>Project Settings &rarr; Project</b>.</p>
     </div>
   </div>
 </section>

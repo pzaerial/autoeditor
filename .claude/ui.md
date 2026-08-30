@@ -68,23 +68,44 @@ All JSON except the two media routes. Bound to `127.0.0.1` only.
 | `POST /api/balance-audio` | Start measuring |
 | `POST /api/balance-audio/cancel` | Stop the running measurement |
 | `POST /api/save-template` | Save As: write the project into `templates/` (or a given path) |
-| `POST /api/export` | Write the project as markdown at an explicit path |
 | `POST /api/reveal` | Open the output folder |
 
-`save-template` and `export` write the same file through the same `to_markdown`; they
-differ only in where they default to. A bare name given to `save-template` is sanitised
-and lands in `templates/`, so the Save As box cannot escape that folder by accident —
-a name with a separator in it is honoured as a path.
+`save-template` writes the project through `to_markdown`. A bare name is sanitised and
+lands in `templates/`; a name with a separator in it is honoured as a path, which is what
+Save as… sends.
 
 ## Project Settings
 
-The **Global Edits** panel holds the opening and closing fades and `audio adjust`, the
-project-wide level. Those are edits to the whole video; they are not output *format*, and
-putting them under Output implied they were. Everything about how one clip meets the next
-lives on the Edit page instead, which is where that decision is actually made.
+Three panels, and each answers one question.
 
-`audio adjust` reaches ffmpeg as a `volume=NdB` in each clip's audio chain — added to that
-clip's own trim, applied before any crossfade, so blends still sound like blends.
+**Project** — which script is open, and where changes go. The *Editing* line names it, and
+is the only thing that claims to; the dropdown beside it is a chooser, not a status
+display, which is why it falls back to its first entry when the open project is not one of
+the listed templates. **Save** overwrites what is open and is disabled until there is
+something to overwrite; **Save as…** picks a folder and a name.
+
+This is also where a project becomes a script, which used to be a separate *Export* box on
+the Render page. That box wrote the same file through the same endpoint, but it started
+empty with only a placeholder for guidance — so clicking it did nothing but print a small
+red line, which reads as broken. One saving control, always pointed somewhere real.
+
+**Output** — a folder, a name and a container, rather than one long path to type correctly.
+The model still keeps a single path, because that is what a script records and what ffmpeg
+is handed; `splitOutput`/`outputFromForm` are the only two places that translate. Splitting
+it is also what puts the path check right beside the field that broke it, which matters
+because Windows silently turns `title: subtitle.mp4` into a 0-byte file. `.mp4`, `.mov` and
+`.mkv` all take h264/aac; `+faststart` is added only for the mp4-family containers that
+have an index to move.
+
+**Auto-Editor** — two opt-in passes and one group of ordinary settings, as fieldsets rather
+than a collapsing panel. Ticking a pass enables its fields and dims them when off, so the
+panel shows what is available as well as what is running; *Clip joining* is never disabled
+because it always applies. The opening and closing fades live there: they are transitions
+to and from black, which is the same question as how one clip meets the next.
+
+There is no Global Edits panel any more. Its `audio adjust` set every clip's level by
+guess, which levelling now does by measurement — keeping both would have been two controls
+for one outcome, applied one after the other.
 
 ## Relinking
 

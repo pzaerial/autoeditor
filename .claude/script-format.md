@@ -19,8 +19,7 @@ timeline options are errors, reported with the line number and the valid set.
 | Heading | Aliases | Purpose |
 |---|---|---|
 | `## Output` | `Output Settings`, `Settings` | Where the file goes, what format it is |
-| `## Global Edits` | `Global`, `Globals`, `Master` | Edits over the whole video, or every clip alike |
-| `## Defaults` | `Default` | Fallbacks for timeline items |
+| `## Defaults` | `Default`, `Joins`, `Global Edits` | How clips are joined, and to the black either end |
 | `## Auto Editor` | `Auto Edit`, `Passes` | Opt-in passes: levelling |
 | `## Silence` | `Trim Silence`, `Dead Space` | Dead-space detection tuning |
 | `## Assets` | `Files`, `Sources` | Named shortcuts for reused clips |
@@ -56,44 +55,19 @@ Hardware encoders can be compiled into ffmpeg and still fail to open on a
 machine without that card. The app checks and greys out the ones it cannot use;
 from the CLI a wrong choice fails at the start of the render.
 
-Audio output is always AAC 192 kbps, 48 kHz stereo.
+Audio output is always AAC 192 kbps, 48 kHz stereo. The container follows the
+output file's extension: `.mp4`, `.mov` and `.mkv` all take these codecs, and
+`+faststart` is applied to the mp4-family ones that have an index to move.
 
-## `## Global Edits`
+### Retired settings
 
-Edits that apply to the finished video, or uniformly to every clip in it. Joins
-between clips are *not* global — they belong to the timeline item.
+`audio adjust` (a gain applied to every clip) was removed: levelling in
+`## Auto Editor` does the same job by measurement rather than by guess. A script
+still carrying it is warned and otherwise unaffected.
 
-| Key | Aliases | Default | Description |
-|---|---|---|---|
-| `fade in` | | `0.5` | Fade up from black at the very start (seconds) |
-| `fade out` | | `0.5` | Fade to black at the very end (seconds) |
-| `audio adjust` | `audio gain`, `volume`, `gain` | `0` | dB added to every clip, on top of that clip's own `volume` |
-
-```markdown
-## Global Edits
-
-- fade in: 0.5
-- fade out: 1
-- audio adjust: -3 dB
-```
-
-`audio adjust` is a straight level change, applied per clip before any blend, so a
-crossfade still sounds like a crossfade. `+6` is roughly twice as loud, `-6` half.
-
-All three keys were originally written under `## Output` and are still read there,
-so an older script keeps rendering identically. If a key appears in both sections,
-`## Global Edits` wins. The app and `to_markdown()` always write them here.
-
-## `## Defaults`
-
-| Key | Aliases | Default | Description |
-|---|---|---|---|
-| `join` | `transition` | `crossfade` | Join used when a timeline item doesn't state one |
-| `crossfade` | | `0.3` | Default crossfade length (seconds) |
-| `fade` | | `0.5` | Default fade-through-black length (seconds) |
-| `trim silence` | `trim` | `no` | Whether clips get dead-space removal by default |
-| `audio overlap` | `audio blend`, `audio crossfade` | *follow picture* | Default length of a join's audio transition (seconds) |
-| `audio lead` | `audio offset` | `0` | Default seconds the audio transition happens before the picture cut |
+`fade in` and `fade out` were once in `## Output` and then in `## Global Edits`.
+They are join settings and now live in `## Defaults`; both older spellings are
+still read, so no script needs rewriting.
 
 ## `## Auto Editor`
 
@@ -186,7 +160,7 @@ ignored.
 | `fade [seconds]` | | Previous fades to black, this fades up from it |
 | `trim silence` | `trim`, `remove silence`, `remove dead space` | Remove dead air from this clip |
 | `keep silence` | `no trim`, `no trim silence` | Leave this clip's dead air alone |
-| `volume [dB]` | `gain`, `audio` | Level trim for this clip, added to `audio adjust` |
+| `volume [dB]` | `gain`, `audio` | Level trim for this clip, added to whatever levelling set |
 | `balance [dB]` | | What levelling measured for this clip; written by the app, so it is not re-measured |
 | `audio overlap [seconds]` | `audio blend`, `audio crossfade` | Length of this join's audio transition; `auto` follows the picture |
 | `audio lead [seconds]` | `audio offset` | Seconds the audio transition happens before the picture cut |
@@ -226,8 +200,8 @@ cover the request it is reduced to what they can, and both the CLI and the app
 print how much was actually available.
 
 `volume` takes a signed number and an optional `dB`: `volume +4`, `gain -2.5 dB`,
-`audio 0`. It stacks with the project's `audio adjust`, so a `-3` project with a
-`+4` clip renders that clip at `+1`. It is matched against the raw option text,
+`audio 0`. It stacks with `balance`, so a clip levelled to `+8` and trimmed by
+`-2` renders at `+6`. It is matched against the raw option text,
 before options are normalised — that normaliser turns a minus into a space, which
 would otherwise read `volume -3` as a boost.
 

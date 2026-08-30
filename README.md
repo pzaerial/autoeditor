@@ -64,8 +64,7 @@ Full reference: [.claude/script-format.md](.claude/script-format.md).
 |---|---|
 | `# Title` | episode name; cosmetic |
 | `## Output` | destination file and format |
-| `## Global Edits` | edits over the whole video, or every clip alike |
-| `## Defaults` | fallbacks for timeline items |
+| `## Defaults` | how clips are joined, and to the black either end |
 | `## Silence` | dead-space detection tuning |
 | `## Assets` | named shortcuts for reused clips |
 | `## Timeline` | the running order — required |
@@ -103,19 +102,6 @@ encoder trace is the one that matters. The CPU stays busy for a real reason: dec
 input and running the transitions is CPU work whatever encodes the result, and that stage
 alone was 3.9s of those 5.5s.
 
-### Global Edits
-
-Aliases: `## Global`, `## Globals`, `## Master`.
-
-| Key | Default | Value |
-|---|---|---|
-| `fade in` | `0.5` | seconds, up from black at the very start |
-| `fade out` | `0.5` | seconds, to black at the very end |
-| `audio adjust` | `0` | dB added to every clip, on top of its own `volume` |
-
-These three used to live under `## Output` and are still read there, so older
-scripts keep working; the app writes them here.
-
 ### Defaults
 
 | Key | Default | Value |
@@ -124,6 +110,8 @@ scripts keep working; the app writes them here.
 | `crossfade` | `0.3` | seconds |
 | `fade` | `0.5` | seconds |
 | `trim silence` | `no` | `yes` / `no` |
+| `fade in` | `0.5` | seconds, up from black at the start |
+| `fade out` | `0.5` | seconds, to black at the end |
 | `audio overlap` | *follow picture* | seconds; default length of a join's audio transition |
 | `audio lead` | `0` | seconds the audio transition runs ahead of the picture cut |
 
@@ -220,7 +208,7 @@ Inputs: `.mp4` `.mov` `.mkv` `.avi` `.m4v` `.webm` `.wmv` `.flv`. Output: h264/a
 One ffmpeg pass, no intermediate files.
 
 1. Normalise each clip — scale + letterbox, target fps, `yuv420p`, audio 48 kHz stereo,
-   then its `volume` trim plus the project's `audio adjust` as one gain
+   then its `volume` trim plus whatever levelling worked out, as one gain
 2. `trim silence` clips: `volumedetect` for peak, `silencedetect` relative to it, trimmed in-graph — analysed over **only the ranges the edit keeps**, which is both quicker and better targeted than measuring a whole stream you are cutting most of
 3. `crossfade` runs blended with `xfade` / `acrossfade`, each clip's audio
    pinned to its own length so nothing drifts against the picture

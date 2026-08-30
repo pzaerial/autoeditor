@@ -10,17 +10,18 @@ Another classic Daily Dub by pZ_aeriaL and the boys.
 - encoder: libx264
 - dry run: no
 
-## Global Edits
+## Auto Editor
 
-- fade in: 0.5
-- fade out: 0.5
-- audio adjust: 0 dB
+- balance audio: no
+- audio target: -14 LUFS
 
 ## Defaults
 
 - join: crossfade
 - crossfade: 0.3
 - fade: 0.5
+- fade in: 0.5
+- fade out: 0.5
 - trim silence: no
 
 ## Silence

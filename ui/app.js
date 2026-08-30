@@ -12,6 +12,8 @@ const state = {
   drag: null,         // in-flight pointer gesture
   view: null,         // {start, end} window the scrubber shows; null = whole clip
   browse: { path: "", files: [], chosen: new Set(), loaded: false, relink: -1 },
+  picker: null,      // in-flight choosePath() request
+  template: "",      // path of the script this project was opened from
   page: "settings",
   poll: null,
   render: { log: [], count: 0, samples: [], hasGpu: false },
@@ -21,10 +23,9 @@ function blankProject() {
   return {
     title: "Untitled",
     output: { file: "", resolution: "1920x1080", fps: 60, encoder: "libx264", quality: null },
-    globals: { fade_in: 0.5, fade_out: 0.5, audio_gain_db: 0 },
     defaults: {
       join: "crossfade", crossfade: 0.3, fade: 0.5, trim_silence: false,
-      audio_overlap: null, audio_lead: 0,
+      fade_in: 0.5, fade_out: 0.5, audio_overlap: null, audio_lead: 0,
     },
     silence: { threshold_db: -30, padding: 0.5, min_silence: 1.0, min_segment: 0.5 },
     balance: { enabled: false, target_lufs: -14 },
@@ -207,17 +208,15 @@ document.addEventListener("visibilitychange", () => {
 // ---------------------------------------------------------------- settings: form binding
 
 const FIELDS = [
-  ["out-file", "output", "file", "string"],
   ["out-resolution", "output", "resolution", "string"],
   ["out-fps", "output", "fps", "int"],
   ["out-encoder", "output", "encoder", "string"],
   ["out-quality", "output", "quality", "opt"],
-  ["glob-fade-in", "globals", "fade_in", "float"],
-  ["glob-fade-out", "globals", "fade_out", "float"],
-  ["glob-audio-gain", "globals", "audio_gain_db", "float"],
   ["def-join", "defaults", "join", "string"],
   ["def-crossfade", "defaults", "crossfade", "float"],
   ["def-fade", "defaults", "fade", "float"],
+  ["def-fade-in", "defaults", "fade_in", "float"],
+  ["def-fade-out", "defaults", "fade_out", "float"],
   ["def-trim", "defaults", "trim_silence", "bool"],
   ["bal-enabled", "balance", "enabled", "bool"],
   ["bal-target", "balance", "target_lufs", "float"],
@@ -250,61 +249,107 @@ function projectToForm() {
     else node.value = value;
   }
   $("project-title").textContent = state.project.title || "";
-  $("render-out-file").value = state.project.output.file;
+  outputToForm();
+  showProjectName();
+  showGroupStates();
+}
+
+/** Which script this project came from, and whether Save has a target. */
+function showProjectName() {
+  const name = state.template
+    ? state.template.split(/[\\/]/).pop().replace(/\.md$/i, "")
+    : "";
+  $("project-current").textContent = name || `${state.project.title || "Untitled"} — not saved yet`;
+  $("save-template").disabled = !state.template;
+  $("save-template").title = state.template
+    ? `Overwrite ${state.template}`
+    : "Use Save as… first; this project has no file yet";
+}
+
+/** Opt-in groups read as available or not, rather than merely unticked. */
+function showGroupStates() {
+  [["group-balance", "bal-enabled"], ["group-silence", "def-trim"]].forEach(([group, box]) => {
+    const on = $(box).checked;
+    $(group).classList.toggle("off", !on);
+    $(group).querySelectorAll(".group-body input, .group-body select, .group-body button")
+      .forEach((node) => (node.disabled = !on));
+  });
 }
 
 FIELDS.forEach(([id, section, key]) =>
   $(id).addEventListener("change", () => {
     formToProject();
-    if (id === "out-file") {
-      $("render-out-file").value = state.project.output.file;
-      checkOutput($("out-check"));
-    }
     if (id === "out-encoder" || id === "out-quality") showEncoderNote();
-    if (key === "audio_gain_db") {
-      applyPreviewGain();
-      showGainTotal();
-    }
-    if (section === "silence" || key === "trim_silence") showAutoEditorState();
+    if (key === "trim_silence") showAutoEditorState();
   })
 );
 
-// ---------------------------------------------------------------- auto-editor panel
+// ---------------------------------------------------------------- output path
 //
-// Opt-in passes stay folded away until they are actually in use: nothing here
-// runs unless you switch it on, so it should not take up the room of a setting
-// you must decide about.
+// The model keeps one path, because that is what a script records and what
+// ffmpeg is handed. The form splits it into the three things a person actually
+// decides -- where, what it is called, and what kind of file it is.
 
-const SILENCE_DEFAULTS = blankProject().silence;
-
-function autoEditorInUse() {
-  const p = state.project;
-  return (
-    p.balance.enabled ||
-    p.defaults.trim_silence ||
-    p.clips.some((c) => c.trim_silence) ||
-    Object.keys(SILENCE_DEFAULTS).some(
-      (k) => Math.abs((p.silence[k] || 0) - SILENCE_DEFAULTS[k]) > 1e-9
-    )
-  );
+function splitOutput(full) {
+  const text = String(full || "");
+  const cut = text.replace(/[\\/][^\\/]*$/, "");
+  const folder = cut === text ? "" : cut;
+  const base = text.slice(folder.length).replace(/^[\\/]/, "");
+  const dot = base.lastIndexOf(".");
+  return dot > 0
+    ? { folder, name: base.slice(0, dot), ext: base.slice(dot).toLowerCase() }
+    : { folder, name: base, ext: ".mp4" };
 }
+
+function outputToForm() {
+  const { folder, name, ext } = splitOutput(state.project.output.file);
+  $("out-folder").value = folder;
+  $("out-name").value = name;
+  const formats = [...$("out-format").options].map((o) => o.value);
+  $("out-format").value = formats.includes(ext) ? ext : ".mp4";
+  $("render-out-file").textContent = state.project.output.file || "(not set)";
+}
+
+function outputFromForm() {
+  const folder = $("out-folder").value.trim().replace(/[\\/]+$/, "");
+  const name = $("out-name").value.trim();
+  const ext = $("out-format").value;
+  state.project.output.file = name ? (folder ? `${folder}\\${name}${ext}` : name + ext) : "";
+  $("render-out-file").textContent = state.project.output.file || "(not set)";
+  checkOutput($("out-check"));
+}
+
+["out-folder", "out-name", "out-format"].forEach((id) =>
+  $(id).addEventListener("change", outputFromForm)
+);
+
+$("browse-output").addEventListener("click", async () => {
+  const chosen = await choosePath({
+    title: "Choose the output folder",
+    start: $("out-folder").value || state.browse.path,
+  });
+  if (!chosen) return;
+  $("out-folder").value = chosen.folder;
+  outputFromForm();
+});
+
+// ---------------------------------------------------------------- auto-editor
+//
+// Two opt-in passes and one group of plain settings. The passes stay switched
+// off until asked for, and their fields go dead with them, so the panel says
+// what is running without hiding what is available.
 
 function showAutoEditorState() {
   const p = state.project;
   const bits = [];
-  if (p.balance.enabled) bits.push(`levels ${p.balance.target_lufs} LUFS`);
-  if (p.defaults.trim_silence) bits.push("trim silence");
+  if (p.balance.enabled) bits.push(`balancing to ${p.balance.target_lufs} LUFS`);
+  if (p.defaults.trim_silence) bits.push("trimming silence");
   else {
     const clips = p.clips.filter((c) => c.trim_silence).length;
-    if (clips) bits.push(`trim silence: ${clips} clip(s)`);
+    if (clips) bits.push(`trimming silence on ${clips} clip(s)`);
   }
-  $("autoeditor-state").textContent = bits.length ? bits.join("  ·  ") : "off";
-}
-
-/** Unfold the panel when a loaded project actually uses any of it. */
-function revealAutoEditorIfUsed() {
-  showAutoEditorState();
-  if (autoEditorInUse()) $("panel-autoeditor").open = true;
+  $("autoeditor-state").textContent = bits.join("  ·  ");
+  showGroupStates();
 }
 
 async function checkOutput(target) {
@@ -511,6 +556,7 @@ $("balance-reset").addEventListener("click", () => {
 $("bal-enabled").addEventListener("change", () => {
   formToProject();
   showAutoEditorState();
+  showGroupStates();
   if (state.project.balance.enabled) runBalance({ onlyUnmeasured: true });
   else {
     $("balance-note").textContent = "";
@@ -526,8 +572,6 @@ $("bal-target").addEventListener("change", () => {
     runBalance();
   }
 });
-
-// ---------------------------------------------------------------- settings: templates
 
 // ---------------------------------------------------------------- encoders
 //
@@ -605,7 +649,11 @@ async function loadTemplates(select) {
       option.value = t.path;
       picker.appendChild(option);
     });
-    if (select) picker.value = select;
+    // A project saved outside templates/ has no option here; falling back to
+    // the first keeps the control readable instead of blank. Which file is
+    // open is the "Editing" line's job, not this one's.
+    picker.value = select || "";
+    if (picker.selectedIndex < 0) picker.selectedIndex = 0;
   } catch (err) {
     toast(err.message, true);
   }
@@ -617,10 +665,10 @@ $("load-template").addEventListener("click", async () => {
 
   if (!path) {
     state.project = blankProject();
+    state.template = "";
     state.selected = -1;
     projectToForm();
-    $("panel-autoeditor").open = false;
-    showAutoEditorState();
+    showEncoderNote();
     refreshAll();
     note.textContent = "Started a blank project.";
     note.className = "note";
@@ -630,18 +678,17 @@ $("load-template").addEventListener("click", async () => {
   try {
     const data = await api("/api/template?path=" + encodeURIComponent(path));
     state.project = data;
+    state.template = path;
     state.selected = data.clips.length ? 0 : -1;
     projectToForm();
     showEncoderNote();
-    revealAutoEditorIfUsed();
-    $("template-name").value = path.split(/[\\/]/).pop().replace(/\.md$/i, "");
     await Promise.all(data.clips.map((c) => probe(c.path)));
     refreshAll();
 
     const missing = data.clips.filter((c) => c.missing).length;
     note.textContent = missing
-      ? `Loaded ${data.clips.length} clips — ${missing} file(s) not found. Remove them or add your own on the Clips page.`
-      : `Loaded ${data.clips.length} clips.`;
+      ? `Opened ${data.clips.length} clips — ${missing} file(s) not found. Relink them on the Clips page.`
+      : `Opened ${data.clips.length} clips.`;
     note.className = missing ? "note warn" : "note ok";
     checkOutput($("out-check"));
   } catch (err) {
@@ -650,28 +697,39 @@ $("load-template").addEventListener("click", async () => {
   }
 });
 
-$("save-template").addEventListener("click", async () => {
+async function saveProject(path) {
   formToProject();
   const note = $("template-note");
-  const name = $("template-name").value.trim();
-  if (!name) {
-    note.textContent = "Give the template a name first.";
-    note.className = "note bad";
-    return;
-  }
   try {
-    const result = await post("/api/save-template", {
-      project: state.project,
-      path: name,
-    });
+    const result = await post("/api/save-template", { project: state.project, path });
+    state.template = result.path;
     await loadTemplates(result.path);
+    showProjectName();
     note.textContent = `Saved to ${result.path}`;
     note.className = "note ok";
-    toast("Template saved.");
+    toast("Saved.");
   } catch (err) {
     note.textContent = err.message;
     note.className = "note bad";
   }
+}
+
+$("save-template").addEventListener("click", () => {
+  if (state.template) saveProject(state.template);
+});
+
+$("save-template-as").addEventListener("click", async () => {
+  const suggested = state.template
+    ? state.template.split(/[\\/]/).pop().replace(/\.md$/i, "")
+    : (state.project.title || "my-episode");
+  const chosen = await choosePath({
+    title: "Save project as",
+    start: state.template ? state.template.replace(/[\\/][^\\/]*$/, "") : "",
+    filename: suggested,
+    extension: ".md",
+  });
+  if (!chosen) return;
+  saveProject(`${chosen.folder}\\${chosen.name}.md`);
 });
 
 // ---------------------------------------------------------------- clips: browser
@@ -704,8 +762,9 @@ async function browse(path) {
     });
 
     const relinking = state.browse.relink >= 0;
+    const foldersOnly = !!state.picker;
 
-    data.files.forEach((file) => {
+    (foldersOnly ? [] : data.files).forEach((file) => {
       state.probes[file.path] = file;
       const row = el("div", "entry" + (previewProblem(file) ? " no-preview" : ""));
       const box = el("input");
@@ -737,16 +796,24 @@ async function browse(path) {
       list.appendChild(row);
     });
 
-    if (!data.dirs.length && !data.files.length) {
-      list.appendChild(el("div", "empty-note", "No folders or video files here."));
+    if (!data.dirs.length && (foldersOnly || !data.files.length)) {
+      list.appendChild(el("div", "empty-note",
+        foldersOnly ? "No folders inside this one." : "No folders or video files here."));
     }
-    showRelinkRest();
+    if (!foldersOnly) showRelinkRest();
   } catch (err) {
     toast(err.message, true);
   }
 }
 
 function updatePickerCount() {
+  if (state.picker) {
+    const named = !state.picker.wantsName || $("picker-name").value.trim();
+    $("picker-count").textContent = state.browse.path || "";
+    $("add-selected").textContent = state.picker.wantsName ? "Save here" : "Use this folder";
+    $("add-selected").disabled = !state.browse.path || !named;
+    return;
+  }
   const n = state.browse.chosen.size;
   const relinking = state.browse.relink >= 0;
   $("picker-count").textContent = n
@@ -755,6 +822,8 @@ function updatePickerCount() {
   $("add-selected").disabled = !n;
   $("add-selected").textContent = relinking ? "Relink" : "Add selected";
 }
+
+$("picker-name").addEventListener("input", updatePickerCount);
 
 /** The folder a clip was last pointed at, so relinking starts somewhere useful. */
 function folderOf(path) {
@@ -789,10 +858,46 @@ function showRelinkRest() {
     `Also relink ${others.length} other missing clip(s) found in this folder`;
 }
 
+/**
+ * Ask for a folder, optionally with a file name. Resolves to
+ * `{folder, name}` or null. Used for the output folder and Save as, so those
+ * do not each grow their own half of a file dialog.
+ */
+function choosePath({ title, subtitle, start, filename, extension } = {}) {
+  return new Promise((resolve) => {
+    state.browse.relink = -1;
+    state.browse.chosen.clear();
+    state.picker = { resolve, wantsName: filename !== undefined };
+
+    $("picker-title").textContent = title || "Choose a folder";
+    $("picker-sub").classList.toggle("hidden", !subtitle);
+    if (subtitle) $("picker-sub").textContent = subtitle;
+    $("relink-rest").classList.add("hidden");
+    $("picker-name-row").classList.toggle("hidden", filename === undefined);
+    $("picker-name").value = filename || "";
+    $("picker-ext").textContent = extension || "";
+
+    $("picker").classList.remove("hidden");
+    browse(start || state.browse.path || "");
+    updatePickerCount();
+    (filename === undefined ? $("browse-path") : $("picker-name")).focus();
+  });
+}
+
+function finishPicker(result) {
+  const pending = state.picker;
+  state.picker = null;
+  $("picker-name-row").classList.add("hidden");
+  closePicker();
+  if (pending) pending.resolve(result);
+}
+
 function openPicker(relinkIndex) {
   const clip = relinkIndex >= 0 ? state.project.clips[relinkIndex] : null;
+  state.picker = null;
   state.browse.relink = clip ? relinkIndex : -1;
   state.browse.chosen.clear();
+  $("picker-name-row").classList.add("hidden");
 
   $("picker-title").textContent = clip ? "Relink clip" : "Add files";
   $("picker-sub").classList.toggle("hidden", !clip);
@@ -815,6 +920,8 @@ function openPicker(relinkIndex) {
 function closePicker() {
   $("picker").classList.add("hidden");
   state.browse.relink = -1;
+  // A dismissed request must still settle, or its caller waits for ever.
+  if (state.picker) finishPicker(null);
 }
 
 /** Point a clip at a new file, keeping its label, regions and joins. */
@@ -850,6 +957,10 @@ $("browse-path").addEventListener("keydown", (e) => {
 });
 
 $("add-selected").addEventListener("click", async () => {
+  if (state.picker) {
+    finishPicker({ folder: state.browse.path, name: $("picker-name").value.trim() });
+    return;
+  }
   if (state.browse.relink >= 0) {
     const target = [...state.browse.chosen][0];
     if (!target) return toast("Pick the file to relink to.", true);
@@ -1223,8 +1334,7 @@ function balanceDb(clip) {
 
 function totalGainDb() {
   const clip = state.project.clips[state.selected];
-  return (state.project.globals.audio_gain_db || 0) +
-    ((clip && clip.audio_gain_db) || 0) + balanceDb(clip);
+  return ((clip && clip.audio_gain_db) || 0) + balanceDb(clip);
 }
 
 function applyPreviewGain() {
@@ -1243,15 +1353,11 @@ function applyPreviewGain() {
 
 function showGainTotal() {
   const db = totalGainDb();
-  const master = state.project.globals.audio_gain_db || 0;
   const levelled = balanceDb(state.project.clips[state.selected]);
   const graph = ensureAudioGraph();
-  const parts = [];
-  if (levelled) parts.push(`${levelled > 0 ? "+" : ""}${levelled} levelling`);
-  if (master) parts.push(`${master > 0 ? "+" : ""}${master} global`);
   $("clip-gain-total").textContent =
     `${db > 0 ? "+" : ""}${db.toFixed(1)} dB total` +
-    (parts.length ? ` (${parts.join(", ")})` : "") +
+    (levelled ? ` (${levelled > 0 ? "+" : ""}${levelled} from levelling)` : "") +
     (!graph && db > 0 ? "  (preview cannot boost)" : "");
 }
 
@@ -2304,7 +2410,6 @@ function renderSummary() {
   const table = $("render-summary");
   const p = state.project;
   const missing = p.clips.filter((c) => c.missing).length;
-  const gain = p.globals.audio_gain_db || 0;
 
   const rows = [
     ["Title", p.title],
@@ -2313,8 +2418,7 @@ function renderSummary() {
     ["Format", `${p.output.resolution} @ ${p.output.fps}fps`],
     ["Encoder", p.output.encoder + (p.output.quality === null || p.output.quality === undefined
       ? "" : `  (quality ${p.output.quality})`)],
-    ["Global fades", `${p.globals.fade_in}s in · ${p.globals.fade_out}s out`],
-    ["Audio adjust", gain ? `${gain > 0 ? "+" : ""}${gain} dB` : "none"],
+    ["Fades", `${p.defaults.fade_in}s in · ${p.defaults.fade_out}s out`],
     ["Levelling", p.balance.enabled ? `on, ${p.balance.target_lufs} LUFS` : "off"],
     ["Audio joins", (() => {
       const offset = p.clips.filter((c, i) => i > 0 && !audioFollowsPicture(c));
@@ -2332,15 +2436,9 @@ function renderSummary() {
   });
 
   miniTimeline($("render-timeline"));
-  $("render-out-file").value = p.output.file;
+  $("render-out-file").textContent = p.output.file || "(not set)";
   checkOutput($("render-out-check"));
 }
-
-$("render-out-file").addEventListener("change", () => {
-  state.project.output.file = $("render-out-file").value;
-  $("out-file").value = state.project.output.file;
-  checkOutput($("render-out-check"));
-});
 
 $("btn-render").addEventListener("click", async () => {
   formToProject();
@@ -2547,28 +2645,6 @@ async function pollRender() {
     if (status.state === "error") toast(status.error, true);
   }
 }
-
-// ---------------------------------------------------------------- export
-
-$("btn-export").addEventListener("click", async () => {
-  formToProject();
-  const path = $("export-path").value.trim();
-  const note = $("export-note");
-  if (!path) {
-    note.textContent = "Enter a file path for the .md";
-    note.className = "note bad";
-    return;
-  }
-  try {
-    const result = await post("/api/export", { project: state.project, path });
-    note.textContent = `Written to ${result.path}`;
-    note.className = "note ok";
-    toast("Exported.");
-  } catch (err) {
-    note.textContent = err.message;
-    note.className = "note bad";
-  }
-});
 
 // ---------------------------------------------------------------- boot
 

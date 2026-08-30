@@ -680,18 +680,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         route = urlparse(self.path).path
         try:
-            if route == "/api/export":
-                data = self._body()
-                script = project.from_json(data["project"])
-                target = Path(data["path"])
-                check_output_path(target)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(
-                    to_markdown(script, notes=data.get("notes", "")), encoding="utf-8"
-                )
-                self._json({"path": str(target)})
-
-            elif route == "/api/save-template":
+            if route == "/api/save-template":
                 data = self._body()
                 script = project.from_json(data["project"])
                 target = _template_target(data.get("path", ""), script.title)

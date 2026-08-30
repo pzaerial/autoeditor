@@ -376,7 +376,6 @@ def _place_audio(
     strictly more machinery for the same result when nothing is offset.
     """
     layout = _audio_layout(infos, clips, groups)
-    master = script.globals.audio_gain_db
     parts: list[str] = []
     placed: list[str] = []
 
@@ -390,7 +389,7 @@ def _place_audio(
         parts += made
 
         chain = ["aresample=48000"]
-        gain = master + clips[i].audio_gain_db + info.balance_db
+        gain = clips[i].audio_gain_db + info.balance_db
         if abs(gain) > 1e-9:
             chain.append(f"volume={gain:g}dB")
         chain.append(_pin(item["duration"]).rstrip(","))
@@ -448,9 +447,8 @@ def _build_filter_complex(
     """Build the filter_complex, returning it with the output video/audio labels."""
     width, height = script.output.size
     fps = script.output.fps
-    in_fade = script.globals.fade_in
-    out_fade = script.globals.fade_out
-    master_gain = script.globals.audio_gain_db
+    in_fade = script.defaults.fade_in
+    out_fade = script.defaults.fade_out
 
     parts: list[str] = []
     # When a join wants its sound off its picture, audio is placed and mixed
@@ -500,8 +498,8 @@ def _build_filter_complex(
         if placed:
             continue
         if info.has_audio:
-            # The project-wide adjust and this clip's own trim are one gain.
-            gain = master_gain + clips[i].audio_gain_db + info.balance_db
+            # This clip's own trim and what levelling worked out are one gain.
+            gain = clips[i].audio_gain_db + info.balance_db
             level = f"volume={gain:g}dB," if abs(gain) > 1e-9 else ""
             parts.append(
                 f"{a_src}"
@@ -816,9 +814,12 @@ def render_script(
         "-map", f"[{a_out}]",
         *_encode_args(script.output.encoder, script.output.quality),
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-movflags", "+faststart",
-        str(output_path),
     ]
+    # faststart moves the index to the front so a file streams before it has
+    # finished downloading. Only mp4-family containers have one to move.
+    if output_path.suffix.lower() in (".mp4", ".m4v", ".mov"):
+        cmd += ["-movflags", "+faststart"]
+    cmd += [str(output_path)]
 
     if on_stage:
         on_stage("encode", f"{script.output.encoder} -> {output_path.name}")

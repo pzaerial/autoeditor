@@ -10,7 +10,6 @@ from .timeline import (
     VIDEO_EXTENSIONS,
     BalanceSettings,
     Defaults,
-    GlobalEdits,
     Join,
     OutputSettings,
     Region,
@@ -42,10 +41,12 @@ _SECTION_ALIASES = {
     "default": "defaults",
     "joins": "defaults",
     "join": "defaults",
-    "global edits": "globals",
-    "global": "globals",
-    "globals": "globals",
-    "master": "globals",
+    # The fades that used to live here are join settings; the section name is
+    # kept so scripts written against it still open.
+    "global edits": "defaults",
+    "global": "defaults",
+    "globals": "defaults",
+    "master": "defaults",
     "auto editor": "autoedit",
     "auto edit": "autoedit",
     "passes": "autoedit",
@@ -340,21 +341,20 @@ _OUTPUT_KEYS = {
     "fps": "fps", "frame rate": "fps", "framerate": "fps",
     "encoder": "encoder", "video encoder": "encoder", "codec": "encoder",
     "quality": "quality", "crf": "quality", "cq": "quality",
-    # Global edits, historically written here; they now live in their own
-    # section and are routed there, so old scripts keep working.
+    # Join settings, historically written here; routed across so scripts
+    # written against the old layout still open.
     "fade in": "fade_in",
     "fade out": "fade_out",
-    "audio adjust": "audio_gain_db",
     "dry run": "dry_run",
 }
 
-_GLOBAL_FROM_OUTPUT = {"fade_in", "fade_out", "audio_gain_db"}
+_JOIN_FROM_OUTPUT = {"fade_in", "fade_out"}
 
-_GLOBAL_KEYS = {
-    "fade in": "fade_in",
-    "fade out": "fade_out",
-    "audio adjust": "audio_gain_db", "audio gain": "audio_gain_db",
-    "volume": "audio_gain_db", "gain": "audio_gain_db",
+# Settings that existed once and no longer do. Named so a script that still
+# carries one gets told what happened rather than "unknown setting".
+_RETIRED_KEYS = {
+    "audio adjust": "levelling replaces it -- see `## Auto Editor`",
+    "audio gain": "levelling replaces it -- see `## Auto Editor`",
 }
 
 _AUTOEDIT_KEYS = {
@@ -375,6 +375,7 @@ _DEFAULT_KEYS = {
     "crossfade": "crossfade",
     "fade": "fade",
     "trim silence": "trim_silence", "trim": "trim_silence",
+    "fade in": "fade_in", "fade out": "fade_out",
     "audio overlap": "audio_overlap", "audio blend": "audio_overlap",
     "audio crossfade": "audio_overlap",
     "audio lead": "audio_lead", "audio offset": "audio_lead",
@@ -391,7 +392,7 @@ def _apply_output(raw: dict[str, tuple[str, int]], base: Path, strict: bool = Tr
         check_output_path(out.file, raw["file"][1])
 
     for field_name, (value, line) in raw.items():
-        if field_name in _GLOBAL_FROM_OUTPUT or field_name == "file":
+        if field_name in _JOIN_FROM_OUTPUT or field_name == "file":
             continue
         if field_name == "resolution":
             if not _RESOLUTION_RE.match(value):
@@ -409,13 +410,6 @@ def _apply_output(raw: dict[str, tuple[str, int]], base: Path, strict: bool = Tr
             setattr(out, field_name, _parse_number(value, field_name, line))
 
     return out
-
-
-def _apply_globals(raw: dict[str, tuple[str, int]]) -> GlobalEdits:
-    edits = GlobalEdits()
-    for field_name, (value, line) in raw.items():
-        setattr(edits, field_name, _parse_number(value, field_name, line))
-    return edits
 
 
 def _apply_autoedit(raw: dict[str, tuple[str, int]]) -> BalanceSettings:
@@ -466,7 +460,6 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
     warnings: list[str] = []
 
     raw_output: dict[str, tuple[str, int]] = {}
-    raw_globals: dict[str, tuple[str, int]] = {}
     raw_autoedit: dict[str, tuple[str, int]] = {}
     raw_silence: dict[str, tuple[str, int]] = {}
     raw_defaults: dict[str, tuple[str, int]] = {}
@@ -476,7 +469,6 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
 
     section_tables = {
         "output": (_OUTPUT_KEYS, raw_output),
-        "globals": (_GLOBAL_KEYS, raw_globals),
         "autoedit": (_AUTOEDIT_KEYS, raw_autoedit),
         "silence": (_SILENCE_KEYS, raw_silence),
         "defaults": (_DEFAULT_KEYS, raw_defaults),
@@ -521,6 +513,11 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
         else:
             key, value = _split_kv(content, lineno, section.capitalize())
             table, target = section_tables[section]
+            if key in _RETIRED_KEYS and key not in table:
+                warnings.append(
+                    f"line {lineno}: `{key}` was removed -- {_RETIRED_KEYS[key]}"
+                )
+                continue
             if key not in table:
                 raise _unknown_key(key, table, section, lineno)
             target[table[key]] = (value, lineno)
@@ -529,12 +526,10 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
         raise ScriptError("no `## Timeline` section found -- nothing to render")
 
     output = _apply_output(raw_output, base, strict)
-    # An explicit Global Edits section wins over the same key left in Output.
-    inherited = {
-        k: v for k, v in raw_output.items()
-        if k in _GLOBAL_FROM_OUTPUT and k not in raw_globals
-    }
-    edits = _apply_globals({**inherited, **raw_globals})
+    # A fade named in Output belongs to the joins; an explicit one there wins.
+    for key, value in raw_output.items():
+        if key in _JOIN_FROM_OUTPUT and key not in raw_defaults:
+            raw_defaults[key] = value
     silence = _apply_silence(raw_silence)
     balance = _apply_autoedit(raw_autoedit)
     defaults = _apply_defaults(raw_defaults)
@@ -552,7 +547,6 @@ def parse_script(path: Path, *, strict: bool = True) -> VideoScript:
         output=output,
         silence=silence,
         defaults=defaults,
-        globals=edits,
         balance=balance,
         clips=clips,
     )

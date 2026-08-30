@@ -1,7 +1,5 @@
 """Render a VideoScript back to the markdown script format."""
 
-from pathlib import Path
-
 from .timecode import format_timecode
 from .timeline import Defaults, Join, VideoScript
 
@@ -55,7 +53,6 @@ def _item_options(clip, defaults: Defaults) -> list[str]:
 def to_markdown(script: VideoScript, *, notes: str = "") -> str:
     """Serialise a script to markdown that parses back to the same edit."""
     out, silence, defaults = script.output, script.silence, script.defaults
-    edits = script.globals
     lines: list[str] = [f"# {script.title}", ""]
 
     if notes:
@@ -70,12 +67,6 @@ def to_markdown(script: VideoScript, *, notes: str = "") -> str:
         f"- encoder: {out.encoder}",
         *([f"- quality: {_fmt(out.quality)}"] if out.quality is not None else []),
         "",
-        "## Global Edits",
-        "",
-        f"- fade in: {_fmt(edits.fade_in)}",
-        f"- fade out: {_fmt(edits.fade_out)}",
-        f"- audio adjust: {_fmt(edits.audio_gain_db)} dB",
-        "",
         "## Auto Editor",
         "",
         f"- balance audio: {'yes' if script.balance.enabled else 'no'}",
@@ -86,6 +77,8 @@ def to_markdown(script: VideoScript, *, notes: str = "") -> str:
         f"- join: {defaults.join.value}",
         f"- crossfade: {_fmt(defaults.crossfade)}",
         f"- fade: {_fmt(defaults.fade)}",
+        f"- fade in: {_fmt(defaults.fade_in)}",
+        f"- fade out: {_fmt(defaults.fade_out)}",
         f"- trim silence: {'yes' if defaults.trim_silence else 'no'}",
         f"- audio lead: {_fmt(defaults.audio_lead)}",
         "",
@@ -116,8 +109,3 @@ def to_markdown(script: VideoScript, *, notes: str = "") -> str:
 
     return "\n".join(lines) + "\n"
 
-
-def write_script(script: VideoScript, path: Path, *, notes: str = "") -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(to_markdown(script, notes=notes), encoding="utf-8")
-    return path

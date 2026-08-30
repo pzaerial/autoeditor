@@ -43,17 +43,6 @@ class SilenceSettings:
 
 
 @dataclass
-class GlobalEdits:
-    """Edits applied to the finished video, or uniformly to every clip."""
-
-    # Fade up from black at the very start and down at the very end.
-    fade_in: float = 0.5
-    fade_out: float = 0.5
-    # A constant gain applied to every clip's audio, on top of its own trim.
-    audio_gain_db: float = 0.0
-
-
-@dataclass
 class BalanceSettings:
     """Level every clip to the same loudness. Opt-in, like silence trimming."""
 
@@ -64,11 +53,14 @@ class BalanceSettings:
 
 @dataclass
 class Defaults:
-    """Fallbacks for timeline items that do not state their own."""
+    """How clips are joined: to each other, and to the black either end."""
 
     join: Join = Join.CROSSFADE
     crossfade: float = 0.3
     fade: float = 0.5
+    # Up from black at the very start, down to black at the very end.
+    fade_in: float = 0.5
+    fade_out: float = 0.5
     trim_silence: bool = False
     # How a join's sound is handled when the item does not say. None means the
     # audio transition simply matches the picture's.
@@ -140,7 +132,6 @@ class VideoScript:
     output: OutputSettings
     silence: SilenceSettings
     defaults: Defaults
-    globals: GlobalEdits = field(default_factory=GlobalEdits)
     balance: BalanceSettings = field(default_factory=BalanceSettings)
     clips: list[TimelineClip] = field(default_factory=list)
 
