@@ -1,6 +1,7 @@
 import { showAutoEditorState } from "./balance.js";
 import { browse, choosePath } from "./picker.js";
 import { blankProject, probe, state } from "./state.js";
+import { resetView } from "./timeline.js";
 import { $, api, el, post, toast } from "./util.js";
 import { refreshAll } from "./views.js";
 
@@ -253,7 +254,8 @@ $("load-template").addEventListener("click", async () => {
   if (!path) {
     state.project = blankProject();
     state.template = "";
-    state.selected = -1;
+    state.selected = { track: -1, entry: -1 };
+    resetView();
     projectToForm();
     showEncoderNote();
     refreshAll();
@@ -266,16 +268,22 @@ $("load-template").addEventListener("click", async () => {
     const data = await api("/api/template?path=" + encodeURIComponent(path));
     state.project = data;
     state.template = path;
-    state.selected = data.clips.length ? 0 : -1;
+    state.selected = { track: -1, entry: -1 };
+    resetView();
     projectToForm();
     showEncoderNote();
-    await Promise.all(data.clips.map((c) => probe(c.path)));
+    // Every clip's duration has to be known before the timeline can be drawn:
+    // where a clip sits depends on how long the ones before it run.
+    const clips = (data.tracks || []).flatMap((t) =>
+      (t.entries || []).filter((e) => e.type !== "transition"));
+    await Promise.all(clips.map((c) => probe(c.path)));
     refreshAll();
 
-    const missing = data.clips.filter((c) => c.missing).length;
+    const missing = clips.filter((c) => c.missing).length;
+    const tracks = (data.tracks || []).length;
     note.textContent = missing
-      ? `Opened ${data.clips.length} clips — ${missing} file(s) not found. Relink them on the Clips page.`
-      : `Opened ${data.clips.length} clips.`;
+      ? `Opened ${clips.length} clips on ${tracks} track(s) — ${missing} file(s) not found. Relink them on the Clips page.`
+      : `Opened ${clips.length} clips on ${tracks} track(s).`;
     note.className = missing ? "note warn" : "note ok";
     checkOutput($("out-check"));
   } catch (err) {

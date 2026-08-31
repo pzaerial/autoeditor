@@ -14,12 +14,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import library, project
+from . import effects, library, project
 from .encoders import ENCODER_CHOICES, encoder_available, encoder_default_quality
 from .jobs import BALANCE, JOB
 from .library import ROOT, TEMPLATE_DIR, probe_summary, template_target
 from .script_parser import ScriptError, check_output_path, parse_script
-from .script_writer import to_markdown
+from .track_script import parse_project, to_markdown
 
 UI_DIR = ROOT / "ui"
 
@@ -163,8 +163,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"dir": str(TEMPLATE_DIR), "templates": library.templates()})
 
             elif route == "/api/template":
-                script = parse_script(Path(query["path"]), strict=False)
-                self._json(project.to_json(script))
+                # Reads either shape of script: an older one is migrated on the
+                # way in, so opening it in the timeline is all it takes to
+                # convert, and saving writes it back in the new one.
+                self._json(project.project_to_json(
+                    parse_project(Path(query["path"]), strict=False)))
+
+            elif route == "/api/library":
+                # The effect and transition library, so the inspector builds its
+                # controls from the same declaration the renderer reads.
+                self._json(effects.describe_library())
 
             elif route == "/api/balance-audio":
                 self._json(BALANCE.snapshot())
@@ -217,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/save-template":
                 data = self._body()
-                script = project.from_json(data["project"])
+                script = project.project_from_json(data["project"])
                 target = template_target(data.get("path", ""), script.title)
                 check_output_path(target)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -228,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
 
             elif route == "/api/balance-audio":
                 data = self._body()
-                script = project.from_json(data["project"])
+                script = project.project_from_json(data["project"])
                 target = float(data.get("target", script.balance.target_lufs))
                 BALANCE.start(script, target, bool(data.get("only_unmeasured")))
                 self._json({"target": target, **BALANCE.snapshot()})
@@ -238,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(BALANCE.snapshot())
 
             elif route == "/api/render":
-                script = project.from_json(self._body()["project"])
+                script = project.project_from_json(self._body()["project"])
                 if not script.clips:
                     self._fail("the timeline is empty")
                     return

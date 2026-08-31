@@ -31,18 +31,18 @@ front end and the API between them.
 | Module | Owns |
 |---|---|
 | `util.js` | `$`, `el`, formatting, `toast`, the fetch wrappers |
-| `state.js` | the project being edited, the probe cache, the derived durations |
+| `library.js` | the effect and transition registry, fetched from the engine |
+| `state.js` | the project being edited, the probe cache, and `layout()` |
 | `pages.js` | which page is showing |
 | `settings.js` | the settings form, the output path, encoders, opening and saving |
 | `balance.js` | the levelling job and its panel |
 | `picker.js` | the browse modal: adding clips, relinking, `choosePath` |
 | `views.js` | what every page renders in common, and removal with undo |
-| `clips.js` | the Clips page table |
-| `rail.js` | the Edit page's running order |
-| `preview.js` | the video element: playback, seeking, preview gain |
-| `zoom.js` | the visible window of the scrubber, filmstrip, overview |
-| `regions.js` | region bands, the region table, scrubber gestures |
-| `editor.js` | selecting a clip, its joins and its audio |
+| `clips.js` | the Clips page table, grouped by track |
+| `timeline.js` | the Edit page: lanes, clip blocks, transitions, drag, zoom |
+| `inspector.js` | controls for whatever is selected, built from the library |
+| `tracklanes.js` | adding, removing and ordering the tracks themselves |
+| `preview.js` | the video element: following the playhead across the edit |
 | `render.js` | the Render page: stages, log, utilisation, progress |
 | `main.js` | imports everything, then starts it |
 
@@ -64,8 +64,8 @@ right for functions and wrong for anything that changes. Tests opt into globals 
 | Page | What it is for |
 |---|---|
 | **Project Settings** | Template load/save, output file and format, global edits, join defaults, opt-in Auto-Editor passes |
-| **Clips** | What is in the video and in what order — add, reorder, remove, relink, per-clip join, level and silence |
-| **Edit** | One clip at a time: preview, regions, level, joins |
+| **Clips** | Every clip grouped by track — add, reorder, remove, relink, level and silence in bulk |
+| **Edit** | The timeline: lanes, clips, transitions, and an inspector |
 | **Render** | Summary, the render itself, pipeline status, log, utilisation, markdown export |
 
 Settings and Clips were one page. They split because the Clips page is where per-clip
@@ -89,6 +89,7 @@ All JSON except the two media routes. Bound to `127.0.0.1` only.
 |---|---|
 | `GET /api/templates` | The `.md` files in `templates/`, plus that folder's path |
 | `GET /api/template?path=` | Parse one, **non-strict** — missing files come back flagged, not fatal |
+| `GET /api/library` | The effect and transition registry the inspector builds its controls from |
 | `GET /api/browse?path=` | Folder listing: subfolders plus probed video files |
 | `GET /api/probe?path=` | Duration, size, fps, audio, and whether a browser can play it |
 | `GET /api/check-output?path=` | Validates an output path before rendering |
@@ -246,26 +247,28 @@ already highlighted.
 
 ## Removing clips
 
-`removeClip` keeps the removed clip for one undo, offered in the toast and bound to Ctrl+Z,
-because a clip carries regions that are slow to mark again. The Edit page has a **Remove
-clip** button beside the join controls, and `Delete` removes the selected clip — but only
-when no region is highlighted, since `Delete` already means "remove this region" and the
-region is the more specific target.
+`removeClip` keeps the removed clip for one undo, offered in the toast and bound to Ctrl+Z.
+It takes the transition that came with it, so undo restores the whole join rather than
+dropping the clip back in as a hard cut. The inspector has a **Remove clip** button, and
+removing an entry also drops any transition left with nothing on one side of it — which
+can no longer mean anything.
 
 ## Sound across a join
 
-The Edit page's second audio bar is the join's, and only appears from the second
-clip on. **Overlap** is how long the sound takes to change hands; **lead** is how
-far before the picture cut it does so. Left empty, sound follows picture and the
-renderer never leaves its ordinary path.
+Select a transition on the timeline and the inspector offers **Length** and
+**Lead** under *Sound*. Both blank means the sound changes hands with the
+picture, and the renderer never leaves its ordinary path. Length is how long the
+handover takes; lead is how many seconds before the picture cut it happens —
+positive is a J-cut, negative an L-cut.
+
+Because audio has its own lane, an offset is also visible rather than only
+numeric: the transition is drawn twice, once over the picture's overlap and once
+where the *sound* actually crosses, so a J-cut looks like the offset it is.
+Shift-dragging a transition moves the sound alone.
 
 An overlap is played from the clips' own source either side of the cut, so a clip
-used to its last frame has nothing to give. `overlapReport` mirrors the
-renderer's arithmetic against the clip's regions and duration, so the bar says
-`Only 1.00s of 2.00s available` *before* you render rather than leaving you to
-wonder why nothing changed. It is marked an estimate when silence trimming is on,
-since that only ever frees up more. `audio_notes` prints the same finding into
-the render log.
+used to its last frame has nothing to give. `audio_notes` reports any shortfall
+into the render log.
 
 ## Non-strict parsing
 
@@ -275,98 +278,60 @@ is left alone rather than rejected — so a template written on another machine 
 and can be re-pointed. Rendering always re-validates: `RenderJob` calls
 `check_output_path`, and the UI refuses to start with any clip still marked missing.
 
-## Regions
+## The timeline
 
-The Edit page's blue bands are `TimelineClip.regions` — a list of `Region(start, end,
-join, join_duration)`. `join` is how a region attaches to the one before it *within the
-same clip*.
+The Edit page is one lane per track, with the horizontal axis being the finished
+video. That is the axis on which a transition is a thing you can see and point
+at; the old page showed a rail of clips and a scrubber spanning one clip's
+*source*, which could say what was inside a clip but never how clips sat against
+each other.
 
-Regions joined by plain cuts reach ffmpeg through the existing `keep_intervals` machinery:
-`probe_script` clamps them to the real duration and, when `trim silence` is also on,
-**intersects** them with the detected loud regions. One ffmpeg input, no renderer changes.
+### What draws where
 
-A region that crossfades or fades into the previous one cannot be expressed that way, so
-`expand_regions` splits that clip into one clip per region, promoting each region's join to
-a clip join. The ordinary grouping and xfade machinery then handles it with no new cases.
-`probe_script` and `render_script` both work off the expanded list, so anything zipping
-clips against `ClipInfo`s must expand too — `RenderJob` does.
+`state.js`'s `layout(track)` returns each clip's start and length, and it applies
+the **same rule** as `Track.laid_out` in the engine. Anything drawn from a
+different rule would be a lie about what will render, so the two are checked
+against each other over every fixture (`scratchpad/layout_cross.*`), and the
+geometry a transition needs — whether it overlaps, whether it trims the incoming
+clip — travels in `/api/library` rather than being reimplemented here.
 
-### Scrubber interaction
+Everything that maps time to pixels measures `.tl-scale`, which covers exactly
+the striped area; the lane heads take a fixed column and are not part of the time
+axis.
 
-One pointer handler on `#scrubber` covers every gesture, so the video seeks live throughout
-and the filmstrip never starts a native image drag (it is `pointer-events: none` and
-`draggable = false`; that was the original bug where dragging grabbed the thumbnail).
+### Gestures
 
 | Gesture | Result |
 |---|---|
-| drag empty track | scrub, seeking live |
-| drag a region body | move it, clamped to its neighbours |
-| drag a region edge | resize that edge |
-| click a region | select it, for resizing or `Delete` |
-| drag while marking | create a region, committed on release |
-| `[` then `]` | mark from the playhead; commits immediately |
-| wheel | zoom around the pointer |
-| shift + wheel | pan |
-| `+` / `-` / `0` | zoom in, out, fit |
+| Click a clip or transition | Select it; the inspector follows |
+| Click empty ground | Move the playhead there and preview it |
+| Drag a clip | Reorder it among its track's clips |
+| Drag a clip onto another lane | Move it there, pinned where you dropped it |
 
-Marking mode paints the scrubber border amber and shows a hint line, so it is obvious the
-next drag creates rather than scrubs. `Esc` cancels.
+A clip dropped on another lane arrives **pinned**. It has no place in that
+lane's running order, and guessing a slot for it would shift everything else
+there — so it keeps the time it was dropped at, and can be unpinned from the
+inspector to fall back into line. Any transition left joining nothing is
+dropped with it.
+| Alt-drag a clip | Pin it to a time of its own |
+| Drag a clip's edge | Trim its in or out point |
+| Drag a transition | Change its duration |
+| Shift-drag a transition | Move the *sound* — lead it or lag it |
+| Wheel | Zoom about the pointer |
 
-Constraints live in `regionBounds` (a region may only occupy the gap between its
-neighbours) and `MIN_REGION` (0.25s). Every resize, move, create and typed timecode goes
-through them, so regions cannot invert, overlap or escape the clip. `_resolve_regions` in
-the parser enforces the same rules on markdown input.
+### The inspector
 
-Exported markdown writes them as `-- 2:10-5:30, crossfade 0.5, 8:00-12:45`, which parses
-back to the same edit — a UI render and a CLI render of the export produce identical
-output.
+Built from `/api/library`: an effect's own parameters decide its inputs, their
+units and their bounds. Adding an effect to `effects.py` gives it a control in
+the app without `inspector.js` knowing its name — which is the point of having a
+library rather than a fixed set of fields.
 
-### Zoom
+### Tracks
 
-`state.view` is the window of the clip the scrubber shows; `null` means the whole clip.
-Everything drawn on the track — filmstrip, region bands, ruler, playhead — is positioned
-against `view()` rather than the duration, and `positionToTime` reads gestures back out of
-it, so no gesture code knows about zoom at all. `MIN_SPAN` (0.5s) is the floor, which on a
-long stream is a few hundred times magnification.
-
-Below the track, the **overview** strip always shows the whole clip with the visible window
-drawn on it: drag the window to pan, drag either edge to zoom, click the empty track to
-jump. The zoom slider beside it is logarithmic between 1× and `duration / MIN_SPAN`, so its
-travel is even at every scale. Wheeling over the track zooms about the pointer, keeping the
-frame under the cursor still.
-
-Filmstrip rebuilds are debounced by 140 ms and keyed on `path|start|span`, so a wheel-spin
-through a dozen zoom levels asks the backend for one set of thumbnails, not a dozen.
-Playback pans the window when the playhead would leave it.
-
-### Seeking, and keeping the two streams together
-
-Seeking is coalesced through `seekTo`: one pending target, applied on `requestAnimationFrame`
-and re-applied on `seeked`, so dragging never queues work the decoder cannot keep up with.
-
-`fastSeek` is what makes scrubbing feel live, but it lands on the nearest keyframe and
-resolves audio and video separately — which is how a preview ends up sounding a beat
-behind the picture, and why the drift "fixes itself" after a tab switch reloads the
-decoder. So `fastSeek` is used *only* while a gesture is in flight. Every gesture ends
-(`pointerup`), and every playback starts (`play`, `playRegion`), with `settleSeek()`: an
-exact `currentTime` assignment onto the frame the gesture asked for. `lastTarget` records
-that frame, because reading the position back off the element would return wherever
-`fastSeek` landed, not where the user pointed.
-
-Region playback stops on media time inside the `requestAnimationFrame` ticker, not on a
-`setTimeout`. A wall-clock timer drifts against the media clock the moment the decoder
-stalls, which made a region's end land somewhere different each time it was played.
-
-Leaving the Edit page, and hiding the window, both call `stopPlayback()`.
-
-### Preview audio
-
-The preview element feeds a Web Audio `GainNode`, so the dB you dial in is the level you
-hear — `video.volume` alone caps at 1.0 and cannot preview a boost. The node is built
-lazily on first play, because an `AudioContext` starts suspended until a user gesture. If
-Web Audio is unavailable the code falls back to `video.volume`, previews cuts correctly,
-and says so next to the control. Either way the render is unaffected: the gain that
-matters is the `volume` filter in the graph.
+Video tracks stack in the order they appear, first at the bottom. Each lane head
+carries its name, a visibility toggle (video) or mute (both), and a gain that
+applies to everything on it. The last video track cannot be removed — there
+would be nothing to render.
 
 ## Render feedback
 
@@ -404,6 +369,11 @@ is absent and a note says why, rather than drawing a flat zero that reads as an 
 The preview window decodes the file itself, and it decodes less than ffmpeg does. Two
 separate questions decide whether a clip previews, and they are answered in different
 places on purpose.
+
+A clip that cannot be previewed still renders normally, and the timeline still shows where
+it sits — only the picture is missing. An audio-only source (a music bed) is probed for its
+length like any other clip and reports "this file has sound but no picture" rather than
+failing.
 
 **The container** is a fixed property of the build: which demuxers Chromium ships does not
 vary by machine. `_probe_summary` answers that server-side against `PLAYABLE_CONTAINERS`
@@ -447,6 +417,10 @@ middle of a slab.
 
 ## Estimated length
 
-The UI's duration estimate sums kept regions minus crossfade overlaps. It cannot know what
-silence trimming will remove without running detection, so when any clip has `trim silence`
-the figure is labelled "up to … (before silence trimming)" rather than shown as exact.
+The estimate is `projectDuration()`, which runs the same layout the compositor does and
+takes the longest **video** track — a music bed outlasting the last frame is cut off, not an
+extension of the edit. It cannot know what silence trimming will remove without running
+detection, so when any clip carries `trim silence` the figure is labelled
+"up to … (before silence trimming)" rather than shown as exact. That is also the one case
+where the app's layout and the engine's legitimately differ, and why the cross-check skips
+those fixtures rather than pretending to agree.

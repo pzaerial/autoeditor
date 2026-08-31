@@ -1,4 +1,4 @@
-import { syncGainControls } from "./editor.js";
+import { clipGain, hasEffect, setClipGain } from "./library.js";
 import { formToProject, showGroupStates } from "./settings.js";
 import { state } from "./state.js";
 import { $, api, el, fmt, post, toast } from "./util.js";
@@ -16,7 +16,7 @@ export function showAutoEditorState() {
   if (p.balance.enabled) bits.push(`balancing to ${p.balance.target_lufs} LUFS`);
   if (p.defaults.trim_silence) bits.push("trimming silence");
   else {
-    const clips = p.clips.filter((c) => c.trim_silence).length;
+    const clips = allClips().filter((c) => hasEffect(c, "trim silence")).length;
     if (clips) bits.push(`trimming silence on ${clips} clip(s)`);
   }
   $("autoeditor-state").textContent = bits.join("  ·  ");
@@ -28,7 +28,7 @@ export function showAutoEditorState() {
 // Clips recorded in different sessions rarely match, and matching them by ear
 // one at a time is the tedious part of assembling an episode.
 //
-// Levelling writes each clip's `audio_gain_db` -- the same number shown in the
+// Levelling writes each clip's `volume` effect -- the same number shown in the
 // Volume column and editable there. There is deliberately no second "measured"
 // field: two numbers for one outcome meant the Clips page could not say what a
 // clip would actually sound like, and an edit could be silently overruled.
@@ -39,6 +39,12 @@ export function showAutoEditorState() {
 
 // Matches MAX_GAIN_DB in loudness.py; only used to word the summary.
 const MAX_BOOST_DB = 24;
+
+/** Every clip in the project, in the order the backend indexes them. */
+function allClips() {
+  return (state.project.tracks || []).flatMap((t) =>
+    (t.entries || []).filter((e) => e.type !== "transition"));
+}
 
 export function showBalanceResults(rows) {
   const box = $("balance-results");
@@ -84,7 +90,7 @@ export async function runBalance({ onlyUnmeasured } = {}) {
   const note = $("balance-note");
   // With one number, "not yet levelled" is "still sitting at 0 dB" -- anything
   // else is either a measurement already taken or a level someone chose.
-  const pending = state.project.clips.filter((c) => !onlyUnmeasured || !c.audio_gain_db);
+  const pending = allClips().filter((c) => !onlyUnmeasured || !clipGain(c));
   if (!pending.length) {
     if (!onlyUnmeasured) {
       note.textContent = "Add some clips first.";
@@ -146,9 +152,11 @@ export async function pollBalance(target) {
 
   let set = 0;
   status.clips.forEach((row) => {
-    const clip = state.project.clips[row.index];
+    // Row order is `all_clips()` order on the backend, which is track order
+    // then clip order -- the same order `allClips()` walks here.
+    const clip = allClips()[row.index];
     if (!clip || row.gain === null || row.gain === undefined) return;
-    clip.audio_gain_db = row.gain;
+    setClipGain(clip, row.gain);
     set += 1;
   });
   showBalanceResults(status.clips);
@@ -163,7 +171,6 @@ export async function pollBalance(target) {
     ".";
   note.className = capped || skipped ? "note warn" : "note ok";
   refreshAll();
-  if (state.selected >= 0) syncGainControls();
 }
 
 $("balance-cancel").addEventListener("click", () => {
@@ -200,16 +207,15 @@ $("balance-run").addEventListener("click", () => {
 // This clears the one volume number, so it also clears anything typed by hand.
 // Say that plainly rather than quietly discarding someone's work.
 $("balance-reset").addEventListener("click", () => {
-  const set = state.project.clips.filter((c) => c.audio_gain_db).length;
+  const set = allClips().filter((c) => clipGain(c)).length;
   if (set && !confirm(
     `Set all ${set} clip volume(s) back to 0 dB? This clears levels you typed too.`
   )) return;
-  state.project.clips.forEach((clip) => (clip.audio_gain_db = 0));
+  allClips().forEach((clip) => setClipGain(clip, 0));
   showBalanceResults([]);
   $("balance-note").textContent = "Every clip is back to 0 dB and plays at its own level.";
   $("balance-note").className = "note";
   refreshAll();
-  if (state.selected >= 0) syncGainControls();
 });
 
 // Switching it on levels whatever has no level yet, and keeps doing that for
@@ -223,8 +229,7 @@ $("bal-enabled").addEventListener("change", () => {
   else {
     $("balance-note").textContent = "";
     refreshAll();
-    if (state.selected >= 0) syncGainControls();
-  }
+    }
 });
 
 $("bal-target").addEventListener("change", () => {

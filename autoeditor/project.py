@@ -98,6 +98,123 @@ def to_json(script: VideoScript) -> dict:
     }
 
 
+# ---------------------------------------------------------------- tracks
+#
+# The app exchanges a track timeline; the flat-list pair above is what an older
+# saved project still arrives as, and `project_from_json` converts it, so a
+# project saved before the timeline existed opens in it.
+
+def _settings_json(project) -> dict:
+    """The parts of a project that are not its timeline."""
+    return {
+        k: v for k, v in to_json(_as_script_shell(project)).items()
+        if k != "clips"
+    }
+
+
+def _as_script_shell(project):
+    """A VideoScript carrying the project's settings and no clips.
+
+    Only so the settings can be serialised by the one function that knows how;
+    nothing reads its empty timeline.
+    """
+    return VideoScript(
+        source=project.source, title=project.title, output=project.output,
+        silence=project.silence, defaults=project.defaults,
+        balance=project.balance, clips=[],
+    )
+
+
+def entry_to_json(entry) -> dict:
+    from .tracks import Transition
+    if isinstance(entry, Transition):
+        return {
+            "type": "transition",
+            "kind": entry.kind,
+            "duration": entry.duration,
+            "audio_duration": entry.audio_duration,
+            "audio_lead": entry.audio_lead,
+        }
+    return {
+        "type": "clip",
+        "path": str(entry.source),
+        "label": entry.label,
+        "source_in": entry.source_in,
+        "source_out": entry.source_out,
+        "start": entry.start,
+        "link": entry.link,
+        "missing": entry.missing,
+        "effects": [{"name": e.name, "params": dict(e.params)} for e in entry.effects],
+    }
+
+
+def project_to_json(project) -> dict:
+    data = _settings_json(project)
+    data["tracks"] = [
+        {
+            "kind": track.kind.value,
+            "name": track.name,
+            "gain_db": track.gain_db,
+            "muted": track.muted,
+            "hidden": track.hidden,
+            "entries": [entry_to_json(e) for e in track.entries],
+        }
+        for track in project.tracks
+    ]
+    return data
+
+
+def entry_from_json(raw: dict):
+    from .tracks import Clip, Effect, Transition
+    if raw.get("type") == "transition":
+        return Transition(
+            kind=raw.get("kind", "cut"),
+            duration=float(raw.get("duration", 0.0)),
+            audio_duration=_optional(raw.get("audio_duration")),
+            audio_lead=_optional(raw.get("audio_lead")),
+        )
+    path = Path(raw["path"])
+    return Clip(
+        source=path,
+        label=raw.get("label") or path.stem,
+        source_in=float(raw.get("source_in") or 0.0),
+        source_out=_optional(raw.get("source_out")),
+        start=_optional(raw.get("start")),
+        link=raw.get("link"),
+        missing=not path.is_file(),
+        effects=[
+            Effect(e["name"], dict(e.get("params") or {}))
+            for e in raw.get("effects") or []
+        ],
+    )
+
+
+def project_from_json(data: dict):
+    """A Project from the app's JSON, converting an older flat-list save."""
+    from .migrate import to_project
+    from .tracks import Project, Track, TrackKind
+
+    if "tracks" not in data:
+        return to_project(from_json(data))
+
+    shell = from_json({**data, "clips": []})
+    tracks = []
+    for raw in data.get("tracks") or []:
+        tracks.append(Track(
+            kind=TrackKind(raw.get("kind", "video")),
+            name=raw.get("name") or "Track",
+            entries=[entry_from_json(e) for e in raw.get("entries") or []],
+            gain_db=float(raw.get("gain_db") or 0.0),
+            muted=bool(raw.get("muted")),
+            hidden=bool(raw.get("hidden")),
+        ))
+    return Project(
+        source=shell.source, title=shell.title, output=shell.output,
+        silence=shell.silence, defaults=shell.defaults, balance=shell.balance,
+        tracks=tracks,
+    )
+
+
 def from_json(data: dict) -> VideoScript:
     out = data.get("output", {})
     defaults = data.get("defaults", {})

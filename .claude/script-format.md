@@ -22,12 +22,17 @@ timeline options are errors, reported with the line number and the valid set.
 | `## Joins` | `Defaults`, `Global Edits` | How clips meet each other, and the black at either end |
 | `## Auto Editor` | `Auto Edit`, `Passes`, `Silence` | The opt-in passes: levelling and silence trimming |
 | `## Assets` | `Files`, `Sources` | Named shortcuts for reused clips |
-| `## Timeline` | `Sequence`, `Order` | The running order — required |
+| `## Video: <name>` | | A video track — one per layer, first is the bottom |
+| `## Audio: <name>` | | An audio track — a music bed, a commentary pass |
 
-Only `## Timeline` is required; everything else falls back to its default. A
-setting is understood wherever it appears, so an older file with `## Defaults`
-and `## Silence` still opens — saving it from the app rewrites it in the layout
-above.
+At least one track section is required; everything else falls back to its
+default. A setting is understood wherever it appears, so an older file with
+`## Defaults` and `## Silence` still opens — saving it from the app rewrites it
+in the layout above.
+
+An older script with a single `## Timeline` section still opens too: it is read
+and converted to one `Video: Main` track, and saving writes it in the track
+form. Nothing about the render changes.
 
 Keys are case- and punctuation-insensitive: `Fade In`, `fade_in`, `fade-in` and
 `**fade in**` are the same key. Values may be wrapped in backticks or quotes.
@@ -113,6 +118,12 @@ output file's extension: `.mp4`, `.mov` and `.mkv` all take these codecs, and
 
 ### Retired options
 
+`## Timeline` was one flat list of clips, each carrying the join that attached it
+to the one before. That is why there could only ever be one strip of video, and
+why sound could only be moved off its picture through two options bolted onto the
+following clip. A script written that way still opens: it is read, converted to a
+single `Video: Main` track, and renders identically. Saving writes the track form.
+
 `balance [dB]` was a second per-item level, holding what auto-balance measured
 while `volume` held what you typed. One outcome with two controls meant neither
 number told you how a clip would sound, so there is one now: auto-balance writes
@@ -143,139 +154,115 @@ Names are matched the same way keys are (case- and punctuation-insensitive), so
 `` `Ad 1` `` in the timeline finds `ad 1`. An asset may point at a folder or
 glob; it expands like any other source.
 
-## `## Timeline`
+## Tracks
 
-Each item is `source` optionally followed by a separator and options:
+A track is a section; its entries are a numbered list. An entry is either a
+**clip** or a **transition**, and they alternate — a track cannot open or close
+with a transition, or carry two in a row.
 
 ```markdown
-## Timeline
+## Video: Main
 1. `intro`
-2. `C:\Footage\ep12\deck-tech.mp4` -- trim silence
-3. `ad 1` -- fade
-4. `C:\Footage\ep12\games` -- crossfade 0.4, trim silence
+   - volume -9.6 dB
+2. crossfade 0.3
+3. `C:\Users\you\Videos\stream.mp4` @ 1:05:29.724-1:10:09.021
+   - trim silence
+   - volume +12.6 dB
+4. audio overlap 69
+5. `outro`
+
+## Audio: Music
+- gain: -18 dB
+1. `C:\Users\you\Music\bed.mp3` at 0:05
+   - fade in 2
+   - fade out 3
 ```
 
-Separator: `--`, an em dash (`—`), an en dash (`–`), or `|`, surrounded by
-spaces. If the source is wrapped in backticks, the separator is found after the
-closing backtick, so a path containing `--` still parses.
+Transitions are entries in their own right rather than options on the clip that
+follows, because that is what they are on a timeline: something between two
+clips that you can point at and give settings of its own.
 
-### Options
+**A bullet at the left margin is a track setting. An indented one belongs to the
+entry above it.** That is the whole indentation rule.
 
-Comma-separated. Options describe how the clip attaches to the one **before**
-it, so a timeline reads top-down like a cut list. The first item's join is
-ignored.
+### Where a clip sits
 
-| Option | Aliases | Meaning |
-|---|---|---|
-| `cut` | `hard cut` | Hard cut from the previous clip |
-| `crossfade [seconds]` | `dissolve` | Blend with the previous clip |
-| `fade [seconds]` | | Previous fades to black, this fades up from it |
-| `audio overlap [seconds]` | `audio first`, `prelap`, `j-cut` | This clip is *heard* that many seconds before it is *seen* |
-| `trim silence` | `trim`, `remove silence`, `remove dead space` | Remove dead air from this clip |
-| `keep silence` | `no trim`, `no trim silence` | Leave this clip's dead air alone |
-| `volume [dB]` | `gain`, `audio` | This clip's level. Auto-balance writes it; edit it and your value stands |
-| `audio blend [seconds]` | `audio crossfade` | Length of this join's audio transition; `auto` follows the picture |
-| `audio lead [seconds]` | `audio offset` | Seconds the audio transition happens before the picture cut |
-| `2:10-5:30` | `2:10 to 5:30` | Keep only this range of the source |
+Clips are sequential: each starts where the last ended, minus the overlap of the
+transition joining them. `at <time>` pins a clip to a moment of its own instead,
+which is what an overlay, a title or a music bed needs — and what an ordinary
+cut list never has to write.
 
-A duration after `crossfade`/`fade` overrides the default for that join only.
-`crossfade 0` and `fade 0` are treated as `cut`.
+Video tracks stack in the order they appear: the **first is the bottom layer**,
+and a later one covers it. Audio tracks all mix together, so their order is
+presentation only.
 
-### `audio overlap` — heard before it is seen
+### Clip entries
+
+| Part | Meaning |
+|---|---|
+| `` `path` `` or `` `asset` `` | The source. A folder or glob expands to its video files, oldest first |
+| `@ 2:10-5:30` | Keep only this range of the source |
+| `at 0:05` | Pin the clip to this point on the timeline |
+
+### Track settings
+
+| Key | Meaning |
+|---|---|
+| `gain: -18 dB` | Level for everything on the track |
+| `muted: yes` | Leave the track out of the mix |
+| `hidden: yes` | Leave a video track out of the picture |
+
+### Effects
+
+One per bullet under a clip, applied in the order they are listed.
+
+| Effect | Aliases | Takes | Does |
+|---|---|---|---|
+| `volume` | `gain`, `level` | dB | The clip's level — what auto-balance writes, and what you adjust |
+| `fade in` | `fadein` | seconds | Up from black and silence at the clip's own start |
+| `fade out` | `fadeout` | seconds | Down to black and silence at the clip's own end |
+| `trim silence` | `trim`, `remove silence` | — | Drop this clip's dead air |
+| `keep silence` | `no trim` | — | Leave it alone, even with trimming on for the whole edit |
+
+### Transitions
+
+| Transition | Aliases | Picture | Sound |
+|---|---|---|---|
+| `cut` | `hard cut` | Straight from one to the next | Follows |
+| `crossfade d` | `dissolve`, `mix` | The two overlap and blend for `d` | Equal-power crossfade over `d` |
+| `dip to black d` | `fade`, `dip` | First falls to black, second rises out of it | Each side to silence, straight line |
+| `audio overlap d` | `prelap`, `j-cut` | Cut; the incoming clip gives up `d` of its head | Incoming heard *under* the outgoing for `d` |
+
+A `crossfade` shortens the edit by its duration; a `dip to black` does not.
+`audio overlap` does not either — the incoming clip pays for its early sound
+with the picture it gave up, so its own sound and picture stay locked.
+
+Two bullets under a transition give its sound a timeline of its own:
 
 ```markdown
-4. `C:\Assets\outro.mp4` -- audio overlap 10
+4. crossfade 0.5
+   - audio 8
+   - lead 4
 ```
 
-The picture cuts as usual, but this clip's sound starts ten seconds earlier, under
-the picture of the clip before it. To pay for that, **the first ten seconds of this
-clip's picture are dropped**: at the cut you see it already ten seconds in, exactly
-where its own sound has reached. Sound and picture stay locked to each other; only
-their arrival is staggered.
-
-That is what makes it different from `audio lead`, which slides a join's sound off
-its picture and needs spare source either side of the cut to do it. An `audio
-overlap` join needs no handles at all — it takes the sound from the picture it gave
-up. The cost is length: a ten-second overlap makes the finished video ten seconds
-shorter, because that much picture is gone.
-
-It is the natural join for an intro or outro with a music bed: the music starts under
-the last shot, then the picture cuts to it already playing.
-
-Both sides ramp across the **whole** overlap — the incoming rising as the outgoing
-falls — so a ten-second overlap is a ten-second crossfade, not a quick handover with
-a long tail. `audio blend` shortens the ramp if you want the change to happen faster
-than the overlap itself.
+`audio` is how long the sound takes to change hands; `lead` is how many seconds
+before the picture it does so. Positive is a **J-cut** — the next clip is heard
+before it is seen. Negative is an **L-cut** — the last clip is still heard over
+the new picture. Both are paid for out of the clips' own material either side of
+the cut, so the timeline never shifts; where a source has none to give, the ask
+shrinks and the render says so.
 
 ### Crossfade shape
 
-Audio crossfades use an **equal-power** curve (a quarter-sine pair). Two unrelated
-signals ramped linearly sum to about −3 dB where they meet, so a linear crossfade
-sags in the middle; equal power holds the level flat because sin² + cos² = 1. The
-difference is inaudible across a 0.3 s join and obvious across ten seconds, which is
-the length an `audio overlap` join tends to be.
+An audio crossfade is equal power (`qsin`), not linear. Two unrelated signals
+ramped linearly sum to about −3 dB where they meet, so a long linear crossfade
+audibly sags in the middle; a quarter-sine pair holds the level flat. Inaudible
+across a 0.3 s join, obvious across ten — which is the length an `audio overlap`
+tends to be.
 
-### Sound across a join
-
-By default a join's sound changes exactly where its picture does. `audio overlap`
-and `audio lead` separate the two, which is how you carry a music bed across a
-hard cut, or let the outgoing clip's sound run under the incoming picture.
-
-- **`audio blend N`** — the audio transition is a crossfade `N` seconds long,
-  however the picture is joined. `-- cut, audio overlap 3` hard-cuts the picture
-  while the sound blends over three seconds.
-- **`audio lead N`** — the centre of that transition sits `N` seconds *before*
-  the picture cut. Positive is a J-cut, the incoming clip heard before it is
-  seen; negative is an L-cut, the outgoing clip still heard over the new
-  picture.
-
-```markdown
-4. `C:\Assets\outro.mp4` -- cut, audio blend 3, audio lead 1
-```
-
-The overlap is paid for out of the clips' own source either side of the cut: the
-outgoing clip plays on past its out point, the incoming one starts before its in
-point. So the timeline never shifts, the total length is still the picture's, no
-silent gap appears, and only the join you asked about loses lock with its
-picture.
-
-That also means **a clip used to its very last frame has nothing to give**. Trim
-its picture back — with a range, or on the app's Edit page — and the material
-you trimmed becomes the handle the overlap plays from. Where the sources cannot
-cover the request it is reduced to what they can, and both the CLI and the app
-print how much was actually available.
-
-`volume` takes a signed number and an optional `dB`: `volume +4`, `gain -2.5 dB`,
-`audio 0`. It stacks with `balance`, so a clip levelled to `+8` and trimmed by
-`-2` renders at `+6`. It is matched against the raw option text,
-before options are normalised — that normaliser turns a minus into a space, which
-would otherwise read `volume -3` as a boost.
-
-### Ranges
-
-A range keeps only part of a source, which is how you pull sections out of a long stream:
-
-```markdown
-5. `C:\Footage\stream.mp4` -- 2:10-5:30, 41:00-52:20, trim silence
-```
-
-- Timecodes are `SS`, `MM:SS` or `HH:MM:SS`, with optional decimals (`0:05.25`).
-- Repeat the option for several ranges; they are sorted and kept in source order.
-- A clip with no range plays in full.
-- Ranges are clamped to the clip's real duration, so an end past the end is harmless.
-- The end must come after the start, or the script is rejected with its line number.
-- Ranges combine with `trim silence`: silence is removed from **within** the kept ranges.
-- A join written *after* a range applies to the range that follows it, so sections of one
-  clip can blend: `-- fade, 2:10-5:30, crossfade 0.5, 41:00-52:20`. The first join (before
-  any range) is still the clip's join to the previous clip.
-- Ranges must not overlap; overlapping ones are rejected with the line number.
-
-Ranges are matched before a timeline option is normalised, so their `-` survives; that is
-why `2:10-5:30` is unambiguous next to the ` -- ` separator.
-
-These are what the app's Edit page writes when you mark regions on a clip, and they parse
-back to the same edit — a render from the app and a `python script.py` render of its
-export produce identical output.
+A `dip to black` is the exception: each side falls to real silence with nothing
+to sum against, so it takes a straight line, which is also what an editor
+expects of a fade.
 
 ## Paths
 
@@ -301,5 +288,38 @@ with the line number, before any encoding starts.
 
 ## Worked example
 
-See [../templates/example.md](../templates/example.md) for the classic running order:
-intro, deck tech, ad, transition, games with an ad in the middle, outro.
+```markdown
+# Daily Dub 47
+
+## Output
+- file: `C:\Users\you\Videos\out\Daily Dub 47.mp4`
+- resolution: 1920x1080
+- fps: 60
+- encoder: h264_nvenc
+
+## Auto Editor
+- balance audio: yes
+- audio target: -14 LUFS
+
+## Video: Main
+1. `intro`
+2. crossfade 0.3
+3. `C:\Users\you\Videos\capture.mp4` @ 1:05:29.724-1:10:09.021
+   - trim silence
+4. audio overlap 69
+5. `outro`
+
+## Video: Lower third
+1. `C:\Users\you\Assets\name-card.mov` at 0:08
+
+## Audio: Music
+- gain: -20 dB
+1. `C:\Users\you\Music\bed.mp3` at 0:00
+   - fade in 2
+   - fade out 4
+```
+
+The outro is heard 69 seconds before it is seen, under the tail of the capture,
+and gives up 69 seconds of its own picture to pay for it. The name card sits on
+its own layer over the intro; the bed runs underneath everything and is cut off
+where the picture ends.

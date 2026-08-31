@@ -1,6 +1,6 @@
 """What ffprobe says about a clip, and what the edit keeps of it.
 
-`probe_script` is the step between a parsed script and a render: it resolves
+`probe_project` is the step between a parsed timeline and a render: it resolves
 every clip to a `ClipInfo`, works out which parts of each source survive the
 edit, and -- where the script asks for them -- runs the analyses that decide
 that. Everything downstream reads those `ClipInfo`s rather than the files.
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .silence import compute_keep_intervals
 from .timecode import format_time
-from .timeline import VideoScript, expand_regions
+from .tracks import TrackKind
 
 
 @dataclass
@@ -24,6 +24,10 @@ class ClipInfo:
     height: int
     fps: float
     has_audio: bool
+    # False for a source with no picture at all -- a music bed on an audio
+    # track. Everything downstream that draws has to ask, because such a clip
+    # contributes sound and nothing else.
+    has_video: bool = True
     vcodec: str = ""
     acodec: str = ""
     pix_fmt: str = ""
@@ -39,7 +43,13 @@ class ClipInfo:
 
 
 
-def probe_clip(path: Path) -> ClipInfo:
+def probe_clip(path: Path, *, allow_audio_only: bool = False) -> ClipInfo:
+    """What ffprobe says about one file.
+
+    A file with no video stream is an error by default, because everywhere the
+    app offers you a clip it means a clip you can see. An audio track's music
+    bed is the exception, and asks for it.
+    """
     result = subprocess.run(
         [
             "ffprobe", "-v", "quiet",
@@ -54,24 +64,29 @@ def probe_clip(path: Path) -> ClipInfo:
     video_stream = next(
         (s for s in data["streams"] if s["codec_type"] == "video"), None
     )
-    if video_stream is None:
+    if video_stream is None and not allow_audio_only:
         raise ValueError(f"No video stream in {path}")
 
     audio_streams = [s for s in data["streams"] if s["codec_type"] == "audio"]
+    if video_stream is None and not audio_streams:
+        raise ValueError(f"No video or audio stream in {path}")
 
-    fps_num, fps_den = video_stream.get("r_frame_rate", "30/1").split("/")
-    fps = int(fps_num) / int(fps_den) if int(fps_den) else 0.0
+    fps = 0.0
+    if video_stream is not None:
+        fps_num, fps_den = video_stream.get("r_frame_rate", "30/1").split("/")
+        fps = int(fps_num) / int(fps_den) if int(fps_den) else 0.0
 
     return ClipInfo(
         path=path,
         duration=float(data["format"].get("duration", 0)),
-        width=int(video_stream["width"]),
-        height=int(video_stream["height"]),
+        width=int(video_stream["width"]) if video_stream else 0,
+        height=int(video_stream["height"]) if video_stream else 0,
         fps=fps,
         has_audio=bool(audio_streams),
-        vcodec=video_stream.get("codec_name", ""),
+        has_video=video_stream is not None,
+        vcodec=video_stream.get("codec_name", "") if video_stream else "",
         acodec=audio_streams[0].get("codec_name", "") if audio_streams else "",
-        pix_fmt=video_stream.get("pix_fmt", ""),
+        pix_fmt=video_stream.get("pix_fmt", "") if video_stream else "",
     )
 
 
@@ -116,83 +131,86 @@ def _intersect(left, right) -> list[tuple[float, float]]:
 
 
 
-def probe_script(script: VideoScript, *, verbose: bool = True, on_step=None) -> list[ClipInfo]:
-    """Probe every clip, running silence detection where the script asks for it.
+def probe_project(project, *, verbose: bool = True, on_step=None) -> list[ClipInfo]:
+    """Probe every clip of a track timeline, in `project.all_clips()` order.
 
-    Returns one ClipInfo per clip of `expand_regions(script.clips)`, which is
-    what render_script renders -- use that same list if you need to pair them.
+    The same three questions `probe_script` asks -- what range is kept, what of
+    it is not silence, and what the transition before it takes away -- asked of
+    a clip whose range and transition come from its track rather than from
+    fields on itself. That order is also the ffmpeg input order, so a clip's
+    position in this list is its input index.
     """
     def log(msg: str) -> None:
         if verbose:
             print(msg)
 
+    pairs = project.all_clips()
     infos: list[ClipInfo] = []
-    # Keyed by source *and* the spans analysed: the same file cut two ways is
-    # two different questions, and the answer to one is wrong for the other.
     cache: dict[tuple, list[tuple[float, float]] | None] = {}
-    todo = expand_regions(script.clips)
 
     def step(done: int, message: str) -> None:
         if on_step:
-            on_step(done, len(todo), message)
+            on_step(done, len(pairs), message)
 
-    for index, clip in enumerate(todo):
-        step(index, f"reading {clip.path.name}")
-        info = probe_clip(clip.path)
-        keep = (
-            _clamp([r.as_tuple() for r in clip.regions], info.duration)
-            if clip.regions else None
-        )
-
-        if clip.trim_silence and info.has_audio:
-            # Only the material the edit keeps is worth analysing -- see
-            # compute_keep_intervals for why that is also more accurate.
-            spans = keep or [(0.0, info.duration)]
-            key = (clip.path, tuple(spans))
-            if key not in cache:
-                span_total = sum(b - a for a, b in spans)
-                scope = (
-                    f"{format_time(span_total)} of {format_time(info.duration)}"
-                    if keep else format_time(info.duration)
-                )
-                log(f"    analysing silence: {clip.path.name} ({scope})")
-                step(index, f"detecting silence in {clip.path.name}")
-                cache[key] = compute_keep_intervals(
-                    clip.path, info.duration, script.silence, within=spans
-                )
-            loud = cache[key]
-            if loud:
-                keep = _intersect(keep, loud) if keep else loud
-
-        # An `audio overlap` join drops the head of this clip's *picture*; the
-        # sound it belonged to is taken back in audio_layout, which is what
-        # keeps the incoming clip's own sound and picture locked together.
-        if clip.overlap > 0:
-            keep = _drop_head(keep or [(0.0, info.duration)], clip.overlap)
-
-        info.keep_intervals = keep or None
-
-        if info.keep_intervals:
-            removed = info.duration - info.effective_duration
-            log(
-                f"    {clip.path.name}: {len(info.keep_intervals)} segment(s) kept, "
-                f"{format_time(removed)} trimmed "
-                f"({format_time(info.duration)} -> "
-                f"{format_time(info.effective_duration)})"
+    position = 0
+    for track in project.tracks:
+        for index, clip in enumerate(track.clips()):
+            step(position, f"reading {clip.source.name}")
+            info = probe_clip(
+                clip.source, allow_audio_only=track.kind is TrackKind.AUDIO
             )
 
-        infos.append(info)
-        step(index + 1, f"read {clip.path.name}")
+            # The chosen range of the source, if the clip narrows it.
+            end = info.duration if clip.source_out is None else clip.source_out
+            keep = None
+            if clip.source_in > 0 or clip.source_out is not None:
+                keep = _clamp([(clip.source_in, end)], info.duration)
 
-    # Levelling sets each clip's `volume`; the render only applies it. If the
-    # switch is on but nothing was ever measured, the output will not be level
-    # and silence about that would be the wrong kind of quiet.
-    if script.balance.enabled and not any(c.audio_gain_db for c in todo):
+            if clip.trim_silence and info.has_audio:
+                spans = keep or [(0.0, info.duration)]
+                key = (clip.source, tuple(spans))
+                if key not in cache:
+                    span_total = sum(b - a for a, b in spans)
+                    scope = (
+                        f"{format_time(span_total)} of {format_time(info.duration)}"
+                        if keep else format_time(info.duration)
+                    )
+                    log(f"    analysing silence: {clip.source.name} ({scope})")
+                    step(position, f"detecting silence in {clip.source.name}")
+                    cache[key] = compute_keep_intervals(
+                        clip.source, info.duration, project.silence, within=spans
+                    )
+                loud = cache[key]
+                if loud:
+                    keep = _intersect(keep, loud) if keep else loud
+
+            # A transition like `audio overlap` takes the head off this clip's
+            # picture. Its sound reaches back into exactly what was given up,
+            # which is what keeps the two locked to each other.
+            before = track.transition_before(index)
+            trim = before.head_trim if before else 0.0
+            if trim > 0:
+                keep = _drop_head(keep or [(0.0, info.duration)], trim)
+
+            info.keep_intervals = keep or None
+
+            if info.keep_intervals:
+                removed = info.duration - info.effective_duration
+                log(
+                    f"    {clip.source.name}: {len(info.keep_intervals)} segment(s) "
+                    f"kept, {format_time(removed)} trimmed "
+                    f"({format_time(info.duration)} -> "
+                    f"{format_time(info.effective_duration)})"
+                )
+
+            infos.append(info)
+            position += 1
+            step(position, f"read {clip.source.name}")
+
+    if project.balance.enabled and not any(c.gain_db for _, c in pairs):
         log(
             "    note: levelling is on but no clip has a level yet -- "
             "measure them in the app, or set `volume` on each item"
         )
 
     return infos
-
-

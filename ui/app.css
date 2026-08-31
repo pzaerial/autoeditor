@@ -831,3 +831,173 @@ fieldset.group.off legend .check { color: var(--muted); }
 fieldset.group.off .group-body { opacity: .45; }
 fieldset.group .group-body { padding-top: 4px; }
 fieldset.group .note:empty { display: none; }
+
+/* ---------- timeline editor ---------- */
+/*
+ * The horizontal axis is the finished video. Lane heads take a fixed column on
+ * the left, so everything that maps time to pixels measures `.tl-scale`, which
+ * covers exactly the striped area and nothing else.
+ */
+
+:root { --lane-head: 148px; }
+
+.tl-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 10px;
+  align-items: start;
+  height: 100%;
+}
+.tl-main { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.tl-layout .video-wrap {
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  max-height: 40vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.tl-layout .video-wrap video { max-width: 100%; max-height: 40vh; display: block; }
+
+.tl { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+
+.tl-ruler-row { display: flex; border-bottom: 1px solid var(--line); }
+.tl-head-spacer { width: var(--lane-head); flex: 0 0 var(--lane-head); }
+.tl-ruler { position: relative; flex: 1; height: 20px; overflow: hidden; }
+.tl-ruler .tick {
+  position: absolute; top: 0; bottom: 0;
+  border-left: 1px solid var(--line);
+  padding-left: 3px;
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.tl-body { position: relative; overflow-x: hidden; overflow-y: auto; max-height: 34vh; }
+.tl-scale {
+  position: absolute;
+  left: var(--lane-head); right: 0; top: 0; bottom: 0;
+  pointer-events: none;
+}
+.tl-playhead {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent);
+}
+.tl-playhead.hidden { display: none; }
+
+.tl-lane { display: flex; border-bottom: 1px solid var(--line); min-height: 46px; }
+.tl-lane.audio { min-height: 34px; }
+.tl-lane:last-child { border-bottom: 0; }
+
+.tl-head {
+  width: var(--lane-head); flex: 0 0 var(--lane-head);
+  border-right: 1px solid var(--line);
+  padding: 4px 6px;
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--panel-2, rgba(255,255,255,0.02));
+}
+.tl-head .badge {
+  font-size: 10px; font-family: "Cascadia Mono", Consolas, monospace;
+  color: var(--dim);
+}
+.tl-head .name {
+  background: transparent; border: 0; color: var(--fg);
+  font-size: 12px; padding: 0; width: 100%;
+}
+.tl-head .name:focus { outline: 1px solid var(--accent); }
+.tl-head .toggles { display: flex; gap: 3px; align-items: center; }
+.tl-head .toggles .icon { padding: 0 3px; font-size: 11px; line-height: 1.4; }
+.tl-head .toggles .icon.off { opacity: 0.35; }
+.tl-head .gain { width: 46px; font-size: 11px; padding: 0 2px; }
+
+.tl-strip { position: relative; flex: 1; min-width: 0; }
+
+.tl-clip {
+  position: absolute; top: 4px; bottom: 4px;
+  background: linear-gradient(180deg, #2c4a6e, #22384f);
+  border: 1px solid #3d6b96;
+  border-radius: 3px;
+  overflow: hidden;
+  display: flex; align-items: stretch;
+  cursor: grab;
+  min-width: 3px;
+}
+.tl-lane.audio .tl-clip {
+  background: linear-gradient(180deg, #2f5a44, #23422f);
+  border-color: #3f7a5c;
+}
+.tl-clip.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.tl-clip.missing { background: linear-gradient(180deg, #5e3030, #452424); border-color: #8a4a4a; }
+.tl-clip .body { flex: 1; min-width: 0; padding: 2px 4px; pointer-events: none; }
+.tl-clip .name {
+  font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-clip .marks {
+  font-size: 10px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-clip .grip { width: 5px; flex: 0 0 5px; cursor: ew-resize; background: rgba(255,255,255,0.10); }
+.tl-clip .grip:hover { background: var(--accent); }
+
+.tl-trans {
+  position: absolute; top: 0; bottom: 0;
+  border-left: 1px solid var(--warn);
+  border-right: 1px solid var(--warn);
+  background: rgba(255, 182, 72, 0.16);
+  cursor: ew-resize;
+  display: flex; align-items: flex-start; justify-content: center;
+}
+.tl-trans.hard { background: rgba(255, 182, 72, 0.30); }
+.tl-trans.selected { background: rgba(255, 182, 72, 0.45); box-shadow: 0 0 0 1px var(--warn); }
+.tl-trans .label { font-size: 9px; color: var(--warn); pointer-events: none; }
+
+.tl-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tl-actions .hint { font-size: 11px; }
+
+.lane-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.lane-row {
+  display: flex; align-items: center; gap: 4px;
+  border: 1px solid var(--line); border-radius: 3px;
+  padding: 1px 4px; font-size: 11px;
+}
+.lane-row.selected { border-color: var(--accent); }
+.lane-row .kind { color: var(--dim); font-family: "Cascadia Mono", Consolas, monospace; }
+.lane-row .icon { padding: 0 3px; }
+
+/* ---------- inspector ---------- */
+
+.tl-side {
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel);
+  padding: 8px;
+  max-height: calc(100vh - 130px);
+  overflow-y: auto;
+}
+.inspector h2 { font-size: 13px; margin: 0; }
+.inspector h3 { font-size: 11px; margin: 10px 0 4px; color: var(--dim); text-transform: uppercase; }
+.inspector .inspector-head { margin-bottom: 6px; }
+.inspector .path {
+  font-size: 10px; color: var(--dim); word-break: break-all;
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+.inspector .facts { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.inspector .fact { display: flex; justify-content: space-between; font-size: 11px; }
+.inspector .fact .k { color: var(--dim); }
+.inspector .field { display: flex; flex-direction: column; gap: 2px; font-size: 11px; margin: 4px 0; }
+.inspector .field > span { color: var(--dim); }
+.inspector .effect-list { display: flex; flex-direction: column; gap: 6px; }
+.inspector .effect-row {
+  border: 1px solid var(--line); border-radius: 3px; padding: 5px 6px;
+}
+.inspector .effect-name { font-size: 12px; }
+.inspector .effect-row .hint { font-size: 10px; margin-bottom: 2px; }
+.inspector button { margin-top: 8px; }
+
+.clip-track-head {
+  font-size: 11px; color: var(--dim); text-transform: uppercase;
+  margin: 10px 0 2px; display: flex; gap: 6px; align-items: center;
+}

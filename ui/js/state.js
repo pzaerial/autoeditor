@@ -1,22 +1,24 @@
-import { blendLength } from "./editor.js";
-import { browse, choosePath } from "./picker.js";
-import { $, api, fmt } from "./util.js";
-import { view } from "./zoom.js";
+import { headTrimOf, overlapOf, transitionDef } from "./library.js";
+import { api, fmt } from "./util.js";
 
 // ---------------------------------------------------------------- state
+//
+// The project is a list of tracks, each an ordered list of entries: clips and
+// the transitions between them. Where a clip *sits* is a property of the track,
+// worked out by `layout` below, not a field on the clip -- which is what lets
+// two clips share a moment, and a clip sit anywhere on a lane of its own.
 
 export const state = {
   project: blankProject(),
-  selected: -1,     // index into project.clips
-  probes: {},       // path -> {duration, has_audio, playable, ...}
-  marking: false,     // armed to mark a new region
-  markStart: null,    // "[" set, waiting for "]"
-  activeRegion: -1,   // selected region index
+  // Which entry is being edited: an index into a track, and into its entries.
+  selected: { track: -1, entry: -1 },
+  probes: {},         // path -> {duration, has_audio, playable, ...}
   drag: null,         // in-flight pointer gesture
-  view: null,         // {start, end} window the scrubber shows; null = whole clip
+  view: null,         // {start, end} window the timeline shows; null = all of it
+  playing: null,      // {track, entry} the preview is following
   browse: { path: "", files: [], chosen: new Set(), loaded: false, relink: -1 },
-  picker: null,      // in-flight choosePath() request
-  template: "",      // path of the script this project was opened from
+  picker: null,
+  template: "",
   page: "settings",
   poll: null,
   render: { log: [], count: 0, samples: [], hasGpu: false, output: "" },
@@ -32,7 +34,25 @@ export function blankProject() {
     },
     silence: { threshold_db: -30, padding: 0.5, min_silence: 1.0, min_segment: 0.5 },
     balance: { enabled: false, target_lufs: -14 },
-    clips: [],
+    tracks: [newTrack("video", "Main")],
+  };
+}
+
+export function newTrack(kind, name) {
+  return { kind, name, gain_db: 0, muted: false, hidden: false, entries: [] };
+}
+
+export function newClip(path, label) {
+  return {
+    type: "clip",
+    path,
+    label: label || path.split(/[\\/]/).pop().replace(/\.[^.]+$/, ""),
+    source_in: 0,
+    source_out: null,
+    start: null,
+    link: null,
+    missing: false,
+    effects: [],
   };
 }
 
@@ -49,53 +69,101 @@ export async function probe(path) {
   }
 }
 
-export function keptDuration(clip) {
+// ---------------------------------------------------------------- shape
+
+export const isClip = (entry) => entry && entry.type !== "transition";
+export const isTransition = (entry) => entry && entry.type === "transition";
+
+export function tracks() {
+  return state.project.tracks || [];
+}
+
+export function trackAt(index) {
+  return tracks()[index] || null;
+}
+
+export function clipsOf(track) {
+  return (track.entries || []).filter(isClip);
+}
+
+export function selectedEntry() {
+  const track = trackAt(state.selected.track);
+  if (!track) return null;
+  return track.entries[state.selected.entry] || null;
+}
+
+/** How long a clip's chosen range of its source runs. */
+export function sourceLength(clip) {
   const info = state.probes[clip.path];
-  const total = info ? info.duration || 0 : 0;
-  const regions = clip.regions || [];
-  if (!regions.length) return total;
-  // A crossfade between regions overlaps them; a fade does not shorten anything.
-  return regions.reduce((sum, r, i) => {
-    const overlap = i > 0 && r.join === "crossfade" ? r.join_duration || 0 : 0;
-    return sum + Math.max(0, r.end - r.start) - overlap;
-  }, 0);
+  const whole = (info && info.duration) || 0;
+  const out = clip.source_out == null ? whole : clip.source_out;
+  return Math.max(0, out - (clip.source_in || 0));
 }
 
-export const MIN_REGION = 0.25;
-// The tightest the scrubber will zoom: half a second across the whole track.
-export const MIN_SPAN = 0.5;
-
-function clipDuration(clip) {
-  const info = clip ? state.probes[clip.path] : null;
-  return (info && info.duration) || 0;
+/** How long a clip occupies the timeline, after any picture it gives up. */
+export function clipLength(clip, before) {
+  return Math.max(0, sourceLength(clip) - headTrimOf(before));
 }
 
-/** Bounds a region may occupy: the clip, minus its neighbours. */
-export function regionBounds(regions, index, duration) {
-  const before = regions[index - 1];
-  const after = regions[index + 1];
-  return [before ? before.end : 0, after ? after.start : duration];
+/**
+ * Where every clip on a track sits.
+ *
+ * The same rule the engine applies, and it has to stay the same rule: clips are
+ * sequential, each starting where the last ended minus the overlap of the
+ * transition joining them, and a clip with an explicit `start` anchors there
+ * instead. Anything the app draws that the engine would place elsewhere is a
+ * lie about what will render.
+ */
+export function layout(track) {
+  const out = [];
+  let cursor = 0;
+  let before = null;
+  (track.entries || []).forEach((entry, index) => {
+    if (isTransition(entry)) {
+      before = entry;
+      return;
+    }
+    const length = clipLength(entry, before);
+    let start;
+    if (entry.start != null) start = entry.start;
+    else if (!out.length) start = 0;
+    else start = cursor - overlapOf(before);
+    start = Math.max(0, start);
+    out.push({ index, clip: entry, start, length, before, after: null });
+    cursor = start + length;
+    before = null;
+  });
+  // A clip's `after` is the transition immediately following it, if any.
+  out.forEach((placed) => {
+    const next = track.entries[placed.index + 1];
+    placed.after = isTransition(next) ? next : null;
+  });
+  return out;
 }
 
-export function newRegion(start, end) {
-  return { start, end, join: "cut", join_duration: 0 };
+export function trackDuration(track) {
+  return layout(track).reduce((max, p) => Math.max(max, p.start + p.length), 0);
+}
+
+/**
+ * How long the finished video runs. The picture decides -- a bed outlasting the
+ * last frame is cut off rather than extending the edit -- which is the rule the
+ * compositor applies, so the estimate matches the render.
+ */
+export function projectDuration() {
+  const video = tracks().filter((t) => t.kind === "video" && !t.hidden);
+  const pool = video.length ? video : tracks().filter((t) => !t.muted);
+  return pool.reduce((max, t) => Math.max(max, trackDuration(t)), 0);
 }
 
 export function estimateTotal() {
-  let total = 0;
-  state.project.clips.forEach((clip, i) => {
-    total += keptDuration(clip);
-    if (i === 0) return;
-    if (clip.join === "crossfade") total -= clip.join_duration || 0;
-    total -= joinTrim(clip);
-  });
-  return Math.max(0, total);
+  return projectDuration();
 }
 
-// Silence trimming only resolves during a render, so the estimate reads high
-// whenever any clip opts into it.
 function estimateIsUpperBound() {
-  return state.project.clips.some((c) => c.trim_silence);
+  return tracks().some((t) =>
+    clipsOf(t).some((c) => (c.effects || []).some((e) => e.name === "trim silence"))
+  );
 }
 
 export function estimateLabel() {
@@ -103,34 +171,36 @@ export function estimateLabel() {
   return estimateIsUpperBound() ? `up to ${text} (before silence trimming)` : text;
 }
 
-export function joinLabel(clip) {
-  return clip.join === "cut" ? "cut" : `${clip.join} ${clip.join_duration}s`;
+// ---------------------------------------------------------------- labels
+
+export function transitionLabel(transition) {
+  if (!transition) return "cut";
+  return transition.duration
+    ? `${transition.kind} ${transition.duration}s`
+    : transition.kind;
 }
 
-export function audioFollowsPicture(clip) {
-  if (clip.join === "audio overlap") return false;
-  return !clip.audio_lead &&
-    Math.abs(blendLength(clip) - (clip.join_duration || 0)) < 1e-9;
+/** True when a transition's sound needs no timeline of its own. */
+export function audioFollowsPicture(transition) {
+  if (!transition) return true;
+  const def = transitionDef(transition.kind);
+  if (def.audio_mode && def.audio_mode !== "crossfade") return false;
+  if (def.trims_incoming) return false;
+  const blend = transition.audio_duration == null
+    ? transition.duration || 0
+    : transition.audio_duration;
+  return !transition.audio_lead &&
+    Math.abs(blend - (transition.duration || 0)) < 1e-9;
 }
 
-/** The default seconds for a join, matching what the parser would choose. */
-export function joinDuration(join, defaults) {
-  if (join === "cut") return 0;
-  if (join === "fade") return defaults.fade;
-  if (join === "audio overlap") return defaults.audio_overlap;
-  return defaults.crossfade;
+export function audioJoinLabel(transition) {
+  const blend = transition.audio_duration == null
+    ? transition.duration || 0
+    : transition.audio_duration;
+  const lead = transition.audio_lead || 0;
+  return `audio ${blend}s` + (lead ? ` @ ${lead > 0 ? "+" : ""}${lead}s` : "");
 }
 
-/**
- * How much of the timeline this clip takes up. An `audio overlap` join gives up
- * that many seconds of its own picture, so the estimate must not count them.
- */
-export function joinTrim(clip) {
-  return clip.join === "audio overlap" ? (clip.join_duration || 0) : 0;
-}
-
-export function audioJoinLabel(clip) {
-  const lead = clip.audio_lead || 0;
-  return `audio ${blendLength(clip)}s` +
-    (lead ? ` @ ${lead > 0 ? "+" : ""}${lead}s` : "");
-}
+// The tightest the timeline will zoom: half a second across the whole width.
+export const MIN_SPAN = 0.5;
+export const MIN_CLIP = 0.25;

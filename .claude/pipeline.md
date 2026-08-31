@@ -1,67 +1,106 @@
 # Video Pipeline
 
-The assembly order is whatever the script's `## Timeline` says. Nothing in the
-code knows what an intro, a deck tech or a midroll ad is — those are just clips
-with joins.
+The edit is a set of **tracks**, each an ordered list of **clips** and the
+**transitions** between them. Nothing in the code knows what an intro, a deck
+tech or a midroll ad is — those are clips on a track.
 
 ## From script to output
 
 ```
 myvideo.md
-  → parse_script()    → VideoScript (clips, each with a Join to the one before)
-  → probe_script()    → ClipInfo per clip (+ keep_intervals where silence is trimmed)
-  → _split_into_groups() → runs of crossfaded clips
-  → _build_filter_complex() → one filter_complex string
-  → one ffmpeg call   → output.mp4
+  → parse_project()        → Project (tracks of clips and transitions)
+                             an older `## Timeline` script is migrated here
+  → probe_project()        → ClipInfo per clip (+ keep_intervals, head trims)
+  → build_filter_complex() → one filter_complex for the whole edit
+  → one ffmpeg call        → output.mp4
 ```
 
-## Joins
+## Where a clip sits
 
-Each timeline item states how it attaches to the clip before it:
+`Track.laid_out()` is the only place this is decided, and the app's `layout()`
+in `ui/js/state.js` applies the same rule — the timeline would otherwise draw
+something the render does not produce.
 
-| Join | Effect |
-|---|---|
-| `crossfade d` | `xfade` + `acrossfade` of `d` seconds. Clips stay in the same group. |
-| `cut` | Hard cut. Ends the current group. |
-| `fade d` | Previous group fades to black over `d`, this one fades up over `d`, hard cut between. Ends the current group. |
+> Clips are sequential: each starts where the last ended, minus the overlap of
+> the transition joining them. A clip with an explicit `start` anchors there and
+> the chain resumes from it.
 
-A `crossfade` or `fade` of `0` is collapsed to a `cut` at parse time, so the
-filter graph never contains a zero-length blend.
+That is what keeps an ordinary cut list free of absolute times while still
+allowing an overlay, a title or a music bed to sit anywhere.
 
-## Grouping
+## The library
 
-A **group** is a maximal run of clips joined by `crossfade`. Groups exist
-because an xfade chain has to be built as one connected filter chain, while
-`cut` and `fade` boundaries are plain concatenation.
+`effects.py` declares every effect and transition once: name, aliases,
+parameters, and — for a transition — how it sits on the timeline. Four
+properties decide everything downstream:
+
+| Property | Meaning | True for |
+|---|---|---|
+| `overlaps` | the two clips overlap for the transition's length | `crossfade` |
+| `trims_incoming` | the incoming clip gives up that much *picture* from its head | `audio overlap` |
+| `audio_mode` | `crossfade` (the two swap over) or `under` (the incoming plays beneath) | `under` for `audio overlap` |
+| `audio_curve` | equal power, or ffmpeg's default straight line | `""` for `dip to black` |
+
+`audio overlap` is not a special case in the compiler: it is a transition that
+trims the incoming picture and whose sound plays *under* rather than swapping.
+`dip to black` fades each side to real silence, so it takes a linear curve —
+equal power is only right when two signals overlap and sum.
+
+## Building the graph
+
+Per track, `compositor.py` picks between two shapes:
+
+- **A strip** — the track is one unbroken run of clips with no gaps and no
+  pinned starts. Crossfade runs become `xfade`/`acrossfade` chains, dip-to-black
+  boundaries get `fade`/`afade`, and the runs concatenate. This pulls each
+  source only as the timeline reaches it.
+- **A canvas** — anything else: layers, gaps, pinned clips. Each clip is shifted
+  with `setpts`/`adelay` and composited with `overlay`/`amix`.
+
+Both express the same model; the strip exists because the canvas holds every
+decoder open for the whole edit. On a long HD timeline that was enough to
+starve the mix — `amix` reached the end of the clips it could see and finished
+early, leaving everything after the first clip silent.
+
+Audio takes the same fork, and additionally uses the canvas whenever a
+transition asks its sound to leave its picture (`rides_the_picture`).
+
+Video tracks are overlaid bottom-up onto one opaque black frame; audio tracks
+are mixed. A single opaque full-length track skips that pass — it *is* the
+picture already.
+
+## Audio timing across a join
+
+`audio_handles` works out how much source each side borrows:
 
 ```
-intro  deck-tech   ad     transition  game-1   transition  game-2   outro
-      ×crossfade  ×fade  ×cut        ×crossfade ×crossfade ×crossfade ×fade
-└──── group 0 ────┘└ g1 ┘└──────────── group 2 ────────────┘└─ g3 ─┘
+crossfade mode:  head = lead + (blend - span) / 2
+                 tail = (blend - span) / 2 - lead
+under mode:      head = duration + lead
+                 tail = 0
 ```
+
+`span` is the transition's duration, except where the picture already gave that
+time up at the head (`audio overlap`), where it is 0. Both are clamped to what
+the source actually has outside the in and out points, and to 45% of a clip so
+nothing is asked to give up its middle. A shortfall is reported by
+`audio_notes`.
+
+`_pin` forces each clip's audio to exactly the length its picture occupies. A
+decoder's idea of a clip's length is not the timeline's — AAC pads its final
+frame by up to ~20 ms — and without this each clip's slack pushes the next out
+of step with its own picture.
 
 ## Rendering steps
 
-0. **Dead-space detection** (for clips marked `trim silence`) — measure peak loudness, run `silencedetect` with a floor relative to that peak, invert to loud regions, pad + merge + drop tiny → `keep_intervals`. Cached per source file.
-1. **Normalize** every clip — target resolution (letterboxed via `scale`+`pad`), target fps, `yuv420p`, `setsar=1`; audio to 48 kHz stereo fltp. Clips with `keep_intervals` are `split`/`trim`/`concat`ed first so the silence is gone before normalisation. Clips with no audio track get an `anullsrc` silent track of matching length.
-2. **Crossfade within each group** — an `xfade`/`acrossfade` chain. Each pair may use a different duration.
-3. **Fade at group boundaries** — a `fade` join adds `fade=out`/`afade=out` to the group before it and `fade=in`/`afade=in` to the group after.
-4. **Concat all groups** — hard cuts, in one `concat` filter.
-5. **Final fades** — the output's `fade in` / `fade out` on the fully assembled stream.
+0. **Dead-space detection** for clips carrying `trim silence`, scoped to the
+   spans the edit keeps. Cached per source *and* span.
+1. **Per clip** — drop dead space in-graph, then `scale`/`pad`/`fps`/`setsar`;
+   audio to 48 kHz stereo. Effects emit into this chain, in the order the clip
+   lists them.
+2. **Per track** — strip or canvas, as above.
+3. **Composite** — overlay video tracks, mix audio tracks, apply per-track gain.
+4. **Final** — the limiter when levelling is on, then the output's own fades.
 
-Steps 0–5 are a single ffmpeg invocation; only step 0 runs separate (audio-only, no video decode) passes beforehand.
-
-## xfade offset formula
-
-Durations can differ per join, so the offset is tracked as a running total of
-the chain's own output length rather than a closed form:
-
-```
-acc = duration[0]
-for each following clip i with join duration d:
-    offset = acc - d
-    acc    = acc + duration[i] - d
-```
-
-`acc` at the end is the group's output duration, which is also what the
-group-boundary fade-out position and the total-duration progress bar use.
+All of it is a single ffmpeg invocation; only step 0 runs separate audio-only
+passes beforehand.

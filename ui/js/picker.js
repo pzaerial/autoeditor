@@ -1,8 +1,8 @@
 import { runBalance } from "./balance.js";
-import { previewProblem, selectClip } from "./editor.js";
+import { previewProblem } from "./preview.js";
 import { showPage } from "./pages.js";
-import { video } from "./preview.js";
-import { joinDuration, MIN_REGION, probe, state } from "./state.js";
+import { clipsOf, probe, state, tracks, trackAt } from "./state.js";
+import { appendClips } from "./tracklanes.js";
 import { $, api, el, fmt, toast } from "./util.js";
 import { refreshAll } from "./views.js";
 
@@ -115,7 +115,7 @@ const baseName = (path) => String(path).split(/[\\/]/).pop();
 function relinkable() {
   if (state.browse.relink < 0) return [];
   const here = new Map(state.browse.files.map((f) => [baseName(f.path).toLowerCase(), f.path]));
-  return state.project.clips
+  return allClips()
     .map((clip, index) => ({ clip, index }))
     .filter(({ clip, index }) =>
       index !== state.browse.relink && clip.missing &&
@@ -167,7 +167,7 @@ function finishPicker(result) {
 }
 
 export function openPicker(relinkIndex) {
-  const clip = relinkIndex >= 0 ? state.project.clips[relinkIndex] : null;
+  const clip = relinkIndex >= 0 ? allClips()[relinkIndex] : null;
   state.picker = null;
   state.browse.relink = clip ? relinkIndex : -1;
   state.browse.chosen.clear();
@@ -191,6 +191,12 @@ export function openPicker(relinkIndex) {
   $("browse-path").focus();
 }
 
+/** Every clip in the project, in the order the backend indexes them. */
+function allClips() {
+  return (state.project.tracks || []).flatMap((t) =>
+    (t.entries || []).filter((e) => e.type !== "transition"));
+}
+
 export function closePicker() {
   $("picker").classList.add("hidden");
   state.browse.relink = -1;
@@ -200,18 +206,17 @@ export function closePicker() {
 
 /** Point a clip at a new file, keeping its label, regions and joins. */
 export async function relinkClip(index, path) {
-  const clip = state.project.clips[index];
+  const clip = allClips()[index];
   clip.path = path;
   clip.missing = false;
   delete state.probes[path];
   const info = await probe(path);
 
-  // A shorter replacement cannot keep regions that ran past its end.
+  // A shorter replacement cannot keep an out point past its own end.
   const duration = info.duration || 0;
-  if (duration && clip.regions) {
-    clip.regions = clip.regions
-      .map((r) => ({ ...r, start: Math.min(r.start, duration), end: Math.min(r.end, duration) }))
-      .filter((r) => r.end - r.start > MIN_REGION / 2);
+  if (duration) {
+    if (clip.source_out != null) clip.source_out = Math.min(clip.source_out, duration);
+    clip.source_in = Math.min(clip.source_in || 0, Math.max(0, duration - 0.25));
   }
   return info;
 }
@@ -244,7 +249,6 @@ $("add-selected").addEventListener("click", async () => {
     for (const other of others) await relinkClip(other.index, other.path);
     closePicker();
     refreshAll();
-    if (state.selected === index) selectClip(index);
     toast(others.length ? `Relinked ${others.length + 1} clips.` : "Relinked.");
     return;
   }
@@ -254,25 +258,18 @@ $("add-selected").addEventListener("click", async () => {
     toast("Nothing selected.");
     return;
   }
-  const d = state.project.defaults;
-  picked.forEach((file) => {
-    state.project.clips.push({
-      path: file.path,
-      label: file.name.replace(/\.[^.]+$/, ""),
-      join: d.join,
-      join_duration: joinDuration(d.join, d),
-      trim_silence: d.trim_silence,
-      audio_gain_db: 0,
-      audio_blend: d.audio_blend === undefined ? null : d.audio_blend,
-      audio_lead: d.audio_lead || 0,
-      regions: [],
-      missing: false,
-    });
-  });
+  // Onto the track being worked on, or the first video track if none is.
+  const target = trackAt(state.selected.track) ||
+    tracks().find((t) => t.kind === "video") || tracks()[0];
+  if (!target) {
+    toast("Add a track first.", true);
+    return;
+  }
+  appendClips(target, picked.map((f) => f.path));
+  picked.forEach((f) => probe(f.path));
   state.browse.chosen.clear();
   document.querySelectorAll("#browse-list input[type=checkbox]").forEach((b) => (b.checked = false));
   updatePickerCount();
-  if (state.selected < 0) state.selected = 0;
   refreshAll();
   closePicker();
   toast(`Added ${picked.length} clip(s).`);

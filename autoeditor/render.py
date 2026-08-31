@@ -4,11 +4,10 @@ import subprocess
 import threading
 from pathlib import Path
 
+from .compositor import build_filter_complex as compose, project_duration
 from .encoders import encode_args
-from .graph import build_filter_complex, split_into_groups, total_duration
 from .probe import ClipInfo
 from .timecode import format_time
-from .timeline import VideoScript, expand_regions
 
 
 def _run_with_progress(
@@ -67,8 +66,8 @@ def _run_with_progress(
 
 
 
-def render_script(
-    script: VideoScript,
+def render_project(
+    project,
     infos: list[ClipInfo],
     *,
     verbose: bool = True,
@@ -77,44 +76,46 @@ def render_script(
     on_stderr=None,
     on_stage=None,
 ) -> Path:
-    """Render the script in one ffmpeg pass, writing no intermediate files."""
-    output_path = script.output.file
+    """Render a track timeline in one ffmpeg pass, writing no intermediate files.
+
+    One ffmpeg call for the whole edit, however many tracks it has. This is the
+    only renderer, and both `script.py` and the app's `RenderJob` walk it, which
+    is what keeps a CLI render and an app render the same render.
+    """
+    output_path = project.output.file
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    clips = expand_regions(script.clips)
-    groups = split_into_groups(clips)
-
+    pairs = project.all_clips()
+    tracks = len(project.tracks)
     if verbose and not on_progress:
-        print(f"  Building filter graph ({len(clips)} clips, {len(groups)} group(s))...")
+        print(f"  Building filter graph ({len(pairs)} clips on {tracks} track(s))...")
     if on_stage:
-        on_stage("graph", f"{len(clips)} clips in {len(groups)} group(s)")
+        on_stage("graph", f"{len(pairs)} clips on {tracks} track(s)")
 
-    filter_complex, v_out, a_out = build_filter_complex(infos, clips, groups, script)
+    filter_complex, v_out, a_out = compose(project, infos)
 
     # -progress and -nostats are global options and must precede all -i flags.
     cmd = ["ffmpeg", "-hide_banner", "-y", "-progress", "pipe:1", "-nostats"]
-    for clip in clips:
-        cmd += ["-i", str(clip.path)]
+    for _, clip in pairs:
+        cmd += ["-i", str(clip.source)]
 
     cmd += [
         "-filter_complex", filter_complex,
         "-map", f"[{v_out}]",
         "-map", f"[{a_out}]",
-        *encode_args(script.output.encoder, script.output.quality),
+        *encode_args(project.output.encoder, project.output.quality),
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
     ]
-    # faststart moves the index to the front so a file streams before it has
-    # finished downloading. Only mp4-family containers have one to move.
     if output_path.suffix.lower() in (".mp4", ".m4v", ".mov"):
         cmd += ["-movflags", "+faststart"]
     cmd += [str(output_path)]
 
     if on_stage:
-        on_stage("encode", f"{script.output.encoder} -> {output_path.name}")
+        on_stage("encode", f"{project.output.encoder} -> {output_path.name}")
 
     if verbose or on_progress:
         _run_with_progress(
-            cmd, total_duration(groups, infos, clips), on_progress, on_start, on_stderr
+            cmd, project_duration(project, infos), on_progress, on_start, on_stderr
         )
     else:
         subprocess.run(cmd, check=True, capture_output=True)

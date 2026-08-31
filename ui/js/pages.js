@@ -1,6 +1,6 @@
 import { renderClipTable } from "./clips.js";
 import { stopPlayback } from "./preview.js";
-import { renderClipList } from "./rail.js";
+import { drawTimeline } from "./timeline.js";
 import { renderSummary } from "./render.js";
 import { state } from "./state.js";
 import { $ } from "./util.js";
@@ -19,7 +19,7 @@ export function showPage(name) {
     b.classList.toggle("active", b.dataset.page === name)
   );
   if (name === "clips") renderClipTable();
-  if (name === "edit") renderClipList();
+  if (name === "edit") drawTimeline();
   if (name === "render") renderSummary();
 }
 

@@ -7,17 +7,22 @@ myvideo.md               — the edit: paths, order, format (see script-format.m
 
 autoeditor/              the engine, and the local server the app talks to
     schema.py            — every script setting, declared once
+    effects.py           — the library: every effect and transition, declared once
     timecode.py          — `1:02:03.5` ⇄ seconds, and durations for display
-    timeline.py          — data model: VideoScript, TimelineClip, Join, settings
-    script_parser.py     — parse_script() → VideoScript from a markdown file
-    script_writer.py     — to_markdown() → VideoScript back to a script file
-    project.py           — VideoScript ⇄ the JSON the UI exchanges
+    tracks.py            — the timeline: Project, Track, Clip, Transition, layout
+    timeline.py          — settings, and the retired flat model the migration reads
+    track_script.py      — parse_project() / to_markdown() for the track format
+    script_parser.py     — parse_script() → the old flat model, for migration
+    script_writer.py     — the settings sections, shared by both writers
+    migrate.py           — an old flat script → a track timeline
+    project.py           — Project ⇄ the JSON the UI exchanges
     silence.py           — dead-space detection
     loudness.py          — programme loudness, for levelling clips
     sysmon.py            — CPU/GPU/encoder load, for the render page's graph
     probe.py             — ClipInfo; what the edit keeps of each source
     encoders.py          — encoder profiles, and what this machine can open
-    graph.py             — the filter_complex that is the whole edit
+    compositor.py        — the filter_complex that is the whole edit
+    graph.py             — the retired single-track builder, kept for comparison
     render.py            — running that one ffmpeg call, watched
     jobs.py              — render and measurement as background jobs
     library.py           — browsing files, and what can be said about each
@@ -35,8 +40,8 @@ script (or the equivalent project built in the app) is the only input.
 
 ## How the pieces line up
 
-The engine knows nothing about the app. `parse_script` → `probe_script` →
-`build_filter_complex` → `render_script` is the whole pipeline, and `script.py`
+The engine knows nothing about the app. `parse_project` → `probe_project` →
+`build_filter_complex` → `render_project` is the whole pipeline, and `script.py`
 walks it directly. The server adds two things on top: JSON in place of markdown
 (`project.py`) and jobs in place of blocking calls (`jobs.py`). Nothing under
 `autoeditor/` imports `server.py`.
@@ -45,20 +50,49 @@ That is what keeps the CLI honest: a project exported from the app renders
 identically from the terminal, because the terminal path is not a second
 implementation.
 
+## tracks.py
+The timeline. `Project` holds the settings objects and an ordered `list[Track]`;
+a `Track` holds `entries`, one list of `Clip`s and the `Transition`s between them,
+because that is what the script and the timeline view both show. `validate`
+holds that list to alternating order.
+
+A clip's **position is a property of the track**, not a field on the clip:
+`Track.laid_out(lengths)` is the single place the layout rule lives, and
+`ui/js/state.js`'s `layout()` applies the same rule so the app cannot draw an
+edit the renderer would not produce. `scratchpad/layout_cross.*` checks the two
+against each other over every fixture.
+
+That one change is what makes layers, overlays, music beds and independent audio
+timing expressible at all. `Join` is gone: `audio overlap` is a transition in the
+library that trims the incoming picture and plays its sound underneath, and the
+compiler knows it only by those two properties.
+
+## effects.py
+Every effect and transition: name, aliases, parameters, and how a transition sits
+on the timeline. Declarations are plain data — the parser, the writer, the docs
+and the app's inspector all read the same registry, and `/api/library` serves it
+to the front end, so a new effect gets a control in the app without the UI being
+told its name. The emitters live beside them, because writing a filter chain is
+not something a table can express.
+
+Adding an effect is one `EffectDef` and one entry in `_EMIT`.
+
 ## timeline.py
-Pure data, no logic. `VideoScript` holds `OutputSettings`, `SilenceSettings`, `BalanceSettings`, `Defaults` and an ordered `list[TimelineClip]`.
+The settings dataclasses — `OutputSettings`, `SilenceSettings`,
+`BalanceSettings`, `Defaults` — plus `VideoScript`, `TimelineClip`, `Join` and
+`Region`, which now exist only so `script_parser` can read an older file and
+`migrate` can convert it. Nothing new should reach for them.
 
-`OutputSettings` is *where and what format*. `Defaults` is *how clips are joined* — to each
-other and to the black either end, which is why the opening and closing fades live there
-rather than in a section of their own.
-
-Each `TimelineClip` carries the `Join` describing how it attaches to the clip **before** it (`CUT`, `CROSSFADE`, `FADE`) plus that join's duration, so the whole edit is a flat list. `regions` optionally narrows a clip to `[(start, end)]` ranges of its source; `audio_gain_db` is that clip's own level trim; `balance_db` is what levelling worked out, kept apart so neither overwrites the other; `audio_blend` and `audio_lead` describe how the join's *sound* is handled when it should not simply follow the picture (`audio_follows_picture()` is the test the renderer branches on); `missing` flags a file that was absent when the script was loaded non-strictly. `VideoScript.describe()` renders the summary printed before a render.
-
-`expand_regions` lives here too: splitting a clip whose regions blend into one clip per region is a transformation of the model, and needs nothing from ffmpeg. Regions joined by plain cuts stay together and are dropped in-graph by `keep_intervals`, which needs only one ffmpeg input. A region that crossfades or fades into the one before it cannot be expressed that way, so the clip becomes several clips and the ordinary join machinery takes over.
+`OutputSettings` is *where and what format*. `Defaults` is *how clips are joined* — to
+each other and to the black either end, which is why the opening and closing fades live
+there rather than in a section of their own. Those four are still the live settings model;
+everything else in this module is legacy.
 
 `GlobalEdits` is gone. Its `audio_gain_db` was a gain applied to every clip by guesswork,
-which levelling now does by measurement; keeping both would have meant two ways to set the
-same thing, applied in sequence. Its fades were join settings all along.
+which levelling now does by measurement. `balance_db` is gone too: it was a second per-clip
+level holding what levelling measured while `audio_gain_db` held what a person typed, and
+one outcome with two controls meant neither number told you how a clip would sound.
+Levelling now writes the one `volume` effect.
 
 ## schema.py
 Every setting a script can carry: its canonical spelling, its aliases, which object and
@@ -148,60 +182,40 @@ a question only the machine can answer.
 nvenc's rate control has to be named: left to its default it honours `-cq` only loosely and
 writes roughly 2.4× the size of libx264 for the same wall time.
 
-## graph.py
+## compositor.py
 The filter_complex, and nothing that runs ffmpeg — which makes it the piece to read when an
-edit comes out wrong.
+edit comes out wrong. See [pipeline.md](pipeline.md) for the shape of the graph; the parts
+worth knowing here:
 
-- `split_into_groups(clips)` → runs of clips joined by `CROSSFADE`; `CUT` and `FADE` joins end a group
-- `group_duration` / `total_duration` → a group's output length after xfade overlap (per-join durations, not one global value)
-- `video_offsets` → where each clip's picture starts; the xfade offsets and the audio layout both read it, so they cannot drift apart
-- `build_filter_complex(infos, clips, groups, script)` → the complete filter_complex:
-  - Per-clip: when `keep_intervals` is set, `split → trim/atrim each interval → concat` to drop dead space in-graph; then `scale/pad/fps/format/setsar` for video, `aresample/aformat` for audio, `anullsrc` for clips with no audio track. The clip's own trim and its levelling become one `volume=NdB`
-  - Per-group: `xfade`+`acrossfade` chain across the group's clips
-  - At `FADE` boundaries: `fade=out`/`afade=out` on the group before, `fade=in`/`afade=in` on the group after
-  - Final: `concat` across all groups, the limiter when levelling is on, then the output's own `fade=in/out`+`afade=in/out`
-- `audio_notes(script, infos)` → the joins whose requested audio overlap the sources could not pay for
+- `clip_lengths` / `project_duration` → how long each clip runs and how long the edit is.
+  The **picture** decides the total: an audio track outlasting the last frame is a music bed
+  that gets cut off rather than extending the video.
+- `is_sequential` / `rides_the_picture` → which of the two graph shapes a track needs
+- `_build_video_strip` / `_build_audio_strip` → the chain, for an unbroken run
+- `_build_video_canvas` / `_build_audio_track` → placement, for layers and pinned clips
+- `audio_handles` → how much source each side of a join borrows, and the fades it gets
+- `audio_notes` → the joins whose sound the sources could not pay for
 
-### Audio placement
+**Why both shapes.** Placement is the general answer and the chain is an optimisation, but
+not only that: laying a long HD timeline onto a canvas holds every decoder open at once, and
+that was enough to starve the mix — `amix` reached the end of the clips it could see and
+finished early, leaving everything after the first clip silent. The chain pulls each source
+only as the timeline reaches it. Both were checked against the pre-rewrite renderer on
+nineteen fixtures: video bit-identical, audio at the AAC round-trip floor.
 
-Sound normally tiles exactly like picture and rides the same concat/acrossfade chain. When a
-join sets `audio_blend`, `audio_lead` or an `audio overlap` join, `uses_audio_offsets` switches the *audio* half of
-the graph to `_place_audio`: each clip's audio is trimmed, faded at its edges, `adelay`ed to
-an absolute position and `amix`ed (`normalize=0`), while the picture concatenates as before.
+Two differences from a naive port are worth keeping in mind, because both were found by
+null-testing rather than by reading:
 
-`audio_layout` does the arithmetic. For each join it works out how much source the request
-needs either side of the cut:
+- A clip kept **whole** must not acquire a trim. Trimming before resampling leaves the
+  resampler a different edge than trimming after it, and the difference shows up at the end
+  of the edit. The strip path skips the trim; the placed path always emits it, because that
+  is what it did before.
+- A **dip to black** fades each side to real silence, so it takes ffmpeg's default straight
+  line. Equal power (`qsin`) is right only where two signals overlap and sum.
 
-```
-head = overlap + lead + (blend - join_duration) / 2   source before the in point
-tail = (blend - join_duration) / 2 - lead             source after the out point
-```
-
-`overlap` is non-zero only for an `audio overlap` join, where it is the whole story:
-`probe.py` drops that many seconds off the head of the clip's *picture*, and the head
-above takes exactly that back for its *sound*. The two stay locked to each other, and
-no handles are needed, because the sound is paid for by the picture that was given up.
-
-Both fades then span `min(blend, overlap)` on an equal-power curve (`CROSSFADE_CURVE`),
-so a ten-second overlap is a ten-second crossfade. A linear pair would sag about 3 dB
-where they meet; inaudible over 0.3 s, obvious over ten.
-
-Both are clamped to what the source actually has outside the clip's own in and out points
-(and to 45% of a clip, so nothing is asked to give up its middle). Because head and tail are
-exactly complementary across a join, the segments still tile: the timeline never shifts, the
-total is still the picture's, no gap opens, and only the requested join loses lock with its
-picture. A shortfall is recorded per join and surfaced by `audio_notes`.
-
-Both paths were checked against each other on cut, crossfade, fade, region-split and
-gain-bearing edits: they agree to about −84 dBFS, i.e. AAC round-trip noise. The chain stays
-the default anyway — it is what every existing project renders through, and it pulls each
-source only as the timeline reaches it, where the mix holds every segment open at once.
-
-`_pin` forces each clip's audio to exactly the length its picture occupies. A decoder's idea
-of a clip's length is not the timeline's — AAC pads its final frame by up to ~20 ms, and a
-capture can hand back an audio track shorter than its video — and `concat` believes whatever
-it is given, so without this each clip's slack pushed every later clip out of step with its
-own picture, a drift that grew with the clip count instead of cancelling.
+## graph.py
+The single-track builder this replaced. Kept because it is what nineteen reference renders
+were made with, and it is the thing `compositor.py` is checked against; nothing calls it.
 
 ## render.py
 `render_script(script, infos)` builds the graph and runs one ffmpeg command, writing no

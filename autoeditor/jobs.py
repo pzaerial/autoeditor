@@ -12,12 +12,12 @@ import time
 from pathlib import Path
 
 from .loudness import MAX_GAIN_DB, balance_gain, measure_loudness
-from .probe import probe_clip, probe_script
-from .graph import audio_notes
-from .render import render_script
+from .compositor import audio_notes
+from .probe import probe_clip, probe_project
+from .render import render_project
 from .script_parser import check_output_path
 from .sysmon import Sampler
-from .timeline import expand_regions
+
 
 
 STAGES = [
@@ -153,7 +153,7 @@ class RenderJob:
             check_output_path(script.output.file)
             self._stage("validate", "done", str(script.output.file))
 
-            clips = expand_regions(script.clips)
+            clips = [clip for _, clip in script.all_clips()]
             detecting = any(c.trim_silence for c in clips)
             if not detecting:
                 self._stage("silence", "skipped", "no clip asks for it")
@@ -168,7 +168,7 @@ class RenderJob:
                 if detecting and "silence" in message:
                     self._detail("silence", message)
 
-            infos = probe_script(script, verbose=False, on_step=on_step)
+            infos = probe_project(script, verbose=False, on_step=on_step)
             self._stage("probe", "done", f"{len(clips)} clips")
             if detecting:
                 self._stage("silence", "done")
@@ -209,7 +209,7 @@ class RenderJob:
                     else f"Encoding: {detail}"
                 )
 
-            render_script(
+            render_project(
                 script, infos, verbose=False,
                 on_progress=on_progress, on_start=on_start,
                 on_stderr=self.from_ffmpeg, on_stage=on_stage,
@@ -309,30 +309,38 @@ class BalanceJob:
             proc.terminate()
 
     def _plan(self, script, only_unmeasured: bool) -> list[dict]:
-        """What has to be measured, and how much audio each one is."""
+        """What has to be measured, and how much audio each one is.
+
+        Indexed across the whole project in `all_clips()` order, which is the
+        order the app lays its tracks out in -- so a row here names the same
+        clip the app will write the level back to.
+        """
         work = []
-        for index, clip in enumerate(script.clips):
+        for index, (_, clip) in enumerate(script.all_clips()):
             # "Only unmeasured" now means a clip nobody has set a level on:
             # there is one number, so a non-zero one is either a measurement
             # already taken or a person's own choice. Neither wants overwriting.
-            if only_unmeasured and clip.audio_gain_db:
+            if only_unmeasured and clip.gain_db:
                 continue
             entry = {
                 "index": index, "label": clip.label, "gain": None, "note": "",
-                "path": clip.path, "spans": None, "seconds": 0.0,
+                "path": clip.source, "spans": None, "seconds": 0.0,
             }
-            if clip.missing or not clip.path.is_file():
+            if clip.missing or not clip.source.is_file():
                 entry["note"] = "file not found"
             else:
                 try:
-                    info = probe_clip(clip.path)
+                    info = probe_clip(clip.source, allow_audio_only=True)
                 except Exception:
                     entry["note"] = "unreadable"
                 else:
                     if not info.has_audio:
                         entry["note"] = "no audio track"
                     else:
-                        spans = [r.as_tuple() for r in clip.regions] if clip.regions else None
+                        spans = None
+                        if clip.source_in > 0 or clip.source_out is not None:
+                            end = clip.source_out if clip.source_out is not None                                 else info.duration
+                            spans = [(clip.source_in, end)]
                         entry["spans"] = spans
                         entry["seconds"] = (
                             sum(b - a for a, b in spans) if spans else info.duration

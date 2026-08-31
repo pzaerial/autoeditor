@@ -59,16 +59,22 @@ def probe_summary(path: Path) -> dict:
     }
     info = None
     try:
-        info = probe_clip(path)
+        # A file with no picture is a real clip now -- a music bed on an audio
+        # track -- and the timeline needs its length like any other. Whether it
+        # can be *previewed* is a separate question, answered below.
+        info = probe_clip(path, allow_audio_only=True)
         entry.update(
             duration=info.duration, width=info.width, height=info.height,
             fps=round(info.fps, 3), has_audio=info.has_audio,
+            has_video=info.has_video,
             vcodec=info.vcodec, acodec=info.acodec, pix_fmt=info.pix_fmt,
         )
     except Exception as exc:
         entry["error"] = str(exc)
 
     problem = preview_problem(suffix)
+    if info is not None and not info.has_video and not problem:
+        problem = "this file has sound but no picture"
     entry["playable"] = not problem
     entry["preview_note"] = problem
     return entry

@@ -1,7 +1,7 @@
 import { checkOutput, formToProject } from "./settings.js";
 import { audioFollowsPicture, estimateLabel, state } from "./state.js";
 import { $, api, clamp, el, fmt, post, toast } from "./util.js";
-import { miniTimeline } from "./views.js";
+import { clipCount, miniTimeline } from "./views.js";
 
 // ---------------------------------------------------------------- render page
 
@@ -9,11 +9,13 @@ export function renderSummary() {
   formToProject();
   const table = $("render-summary");
   const p = state.project;
-  const missing = p.clips.filter((c) => c.missing).length;
+  const clips = allClips();
+  const missing = clips.filter((c) => c.missing).length;
 
   const rows = [
     ["Title", p.title],
-    ["Clips", `${p.clips.length}${missing ? ` (${missing} missing)` : ""}`],
+    ["Clips", `${clips.length} on ${(p.tracks || []).length} track(s)` +
+      (missing ? ` (${missing} missing)` : "")],
     ["Estimated length", estimateLabel()],
     ["Format", `${p.output.resolution} @ ${p.output.fps}fps`],
     ["Encoder", p.output.encoder + (p.output.quality === null || p.output.quality === undefined
@@ -21,8 +23,11 @@ export function renderSummary() {
     ["Fades", `${p.defaults.fade_in}s in · ${p.defaults.fade_out}s out`],
     ["Levelling", p.balance.enabled ? `on, ${p.balance.target_lufs} LUFS` : "off"],
     ["Audio joins", (() => {
-      const offset = p.clips.filter((c, i) => i > 0 && !audioFollowsPicture(c));
-      return offset.length ? `${offset.length} offset from the picture` : "follow the picture";
+      const offset = (p.tracks || []).flatMap((t) =>
+        (t.entries || []).filter(
+          (e) => e.type === "transition" && !audioFollowsPicture(e)));
+      return offset.length ? `${offset.length} offset from the picture`
+                           : "follow the picture";
     })()],
     ["Output", p.output.file || "(not set)"],
   ];
@@ -42,9 +47,9 @@ export function renderSummary() {
 
 $("btn-render").addEventListener("click", async () => {
   formToProject();
-  if (!state.project.clips.length) return toast("Add some clips first.", true);
+  if (!clipCount()) return toast("Add some clips first.", true);
   if (!state.project.output.file) return toast("Set an output file.", true);
-  if (state.project.clips.some((c) => c.missing))
+  if (allClips().some((c) => c.missing))
     return toast("Some clips are missing — remove them before rendering.", true);
 
   state.render = { log: [], count: 0, samples: [], hasGpu: false };
@@ -67,6 +72,11 @@ $("btn-cancel").addEventListener("click", async () => {
     toast(err.message, true);
   }
 });
+
+function allClips() {
+  return (state.project.tracks || []).flatMap((t) =>
+    (t.entries || []).filter((e) => e.type !== "transition"));
+}
 
 $("btn-reveal").addEventListener("click", async () => {
   // Prefer where the render actually wrote. That path is absolute, whereas the
